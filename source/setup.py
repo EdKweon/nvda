@@ -9,11 +9,11 @@ import os
 import sys
 import gettext
 gettext.install("nvda")
-from glob import glob
-import fnmatch
+from glob import glob  # noqa: E402
+import fnmatch  # noqa: E402
 # versionInfo names must be imported after Gettext
 # Suppress E402 (module level import not at top of file)
-from versionInfo import (
+from versionInfo import (  # noqa: E402
 	copyright as NVDAcopyright,  # copyright is a reserved python keyword
 	description,
 	formatBuildVersionString,
@@ -23,8 +23,8 @@ from versionInfo import (
 )  # noqa: E402
 from py2exe import freeze  # noqa: E402
 from py2exe.dllfinder import DllFinder  # noqa: E402
-import wx
-import importlib.machinery
+import wx  # noqa: E402
+import importlib.machinery  # noqa: E402
 
 # Explicitly put the nvda_dmp dir on the build path so the DMP library is included
 sys.path.append(os.path.join("..", "include", "nvda_dmp"))
@@ -286,8 +286,7 @@ freeze(
 		excludes=tuple(
 			f"*{ext}" for ext in importlib.machinery.all_suffixes()
 			) + (
-		"*.t2t",
-		"*.t2tconf",
+		"__pycache__",
 		"*.md",
 		"*/user_docs/styles.css",
 		"*/user_docs/numberedHeadings.css",

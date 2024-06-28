@@ -9,6 +9,7 @@ import time
 from typing import (
 	Optional,
 	Dict,
+	Generator,
 	TYPE_CHECKING,
 )
 
@@ -36,14 +37,12 @@ from controlTypes import TextPosition
 from controlTypes.formatFields import TextAlign
 import treeInterceptorHandler
 import browseMode
-import review
-from cursorManager import CursorManager, ReviewCursorManager
-from tableUtils import HeaderCellInfo, HeaderCellTracker
 from . import Window
 from ..behaviors import EditableTextWithoutAutoSelectDetection
 from . import _msOfficeChart
 import locationHelper
 from enum import IntEnum
+import documentBase
 
 if TYPE_CHECKING:
 	import inputCore
@@ -786,7 +785,7 @@ class WordDocumentTextInfo(textInfos.TextInfo):
 		self,
 		formatConfig: Optional[Dict] = None
 	) -> textInfos.TextInfo.TextWithFieldsT:
-		if self.isCollapsed: return []
+		if self.isCollapsed: return []  # noqa: E701
 		if self.obj.ignoreFormatting:
 			return [self.text]
 		extraDetail=formatConfig.get('extraDetail',False) if formatConfig else False
@@ -883,7 +882,7 @@ class WordDocumentTextInfo(textInfos.TextInfo):
 					if fieldTitle:
 						field['name']=fieldTitle
 						field['alwaysReportName']=True
-		if role is not None: field['role']=role
+		if role is not None: field['role']=role  # noqa: E701
 		if role==controlTypes.Role.TABLE and field.get('longdescription'):
 			field['states']=set([controlTypes.State.HASLONGDESC])
 		storyType=int(field.pop('wdStoryType',0))
@@ -964,12 +963,12 @@ class WordDocumentTextInfo(textInfos.TextInfo):
 			languageId = int(field.pop('wdLanguageId',0))
 			if languageId:
 				field['language']=languageHandler.windowsLCIDToLocaleName(languageId)
-		except:
+		except:  # noqa: E722
 			log.debugWarning("language error",exc_info=True)
 			pass
 		for x in ("first-line-indent","left-indent","right-indent","hanging-indent"):
 			v=field.get(x)
-			if not v: continue
+			if not v: continue  # noqa: E701
 			v=float(v)
 			if abs(v)<0.001:
 				v=None
@@ -1147,14 +1146,14 @@ class WordDocumentTextInfo(textInfos.TextInfo):
 	def getMathMl(self, field):
 		try:
 			import mathType
-		except:
+		except:  # noqa: E722
 			raise LookupError("MathType not installed")
 		rangeObj = self._rangeObj.Duplicate
 		rangeObj.Start = int(field["shapeoffset"])
 		obj = rangeObj.InlineShapes[0].OLEFormat
 		try:
 			return mathType.getMathMl(obj)
-		except:
+		except:  # noqa: E722
 			log.debugWarning("Error fetching math with mathType", exc_info=True)
 			raise LookupError("Couldn't get MathML from MathType")
 
@@ -1253,6 +1252,16 @@ class WordDocumentTreeInterceptor(browseMode.BrowseModeDocumentTreeInterceptor):
 		self.rootNVDAObject._moveInTable(row=False,forward=False)
 		braille.handler.handleCaretMove(self)
 
+	def _iterTextStyle(
+			self,
+			kind: str,
+			direction: documentBase._Movement = documentBase._Movement.NEXT,
+			pos: textInfos.TextInfo | None = None
+	) -> Generator[browseMode.TextInfoQuickNavItem, None, None]:
+		raise NotImplementedError(
+			"word textInfos are not supported due to multiple issues with them - #16569"
+		)
+
 	__gestures={
 		"kb:tab":"trapNonCommandGesture",
 		"kb:shift+tab":"trapNonCommandGesture",
@@ -1318,7 +1327,7 @@ class WordDocument(Window):
 	def _get_WinwordDocumentObject(self):
 		if not getattr(self,'_WinwordDocumentObject',None): 
 			windowObject=self.WinwordWindowObject
-			if not windowObject: return None
+			if not windowObject: return None  # noqa: E701
 			self._WinwordDocumentObject=windowObject.document
 		return self._WinwordDocumentObject
 
@@ -1330,7 +1339,7 @@ class WordDocument(Window):
 	def _get_WinwordSelectionObject(self):
 		if not getattr(self,'_WinwordSelectionObject',None):
 			windowObject=self.WinwordWindowObject
-			if not windowObject: return None
+			if not windowObject: return None  # noqa: E701
 			self._WinwordSelectionObject=windowObject.selection
 		return self._WinwordSelectionObject
 
@@ -1670,7 +1679,7 @@ class WordDocument_WwN(WordDocument):
 
 	def _get_WinwordWindowObject(self):
 		window=super(WordDocument_WwN,self).WinwordWindowObject
-		if not window: return None
+		if not window: return None  # noqa: E701
 		try:
 			return window.application.activeWindow.activePane
 		except COMError:

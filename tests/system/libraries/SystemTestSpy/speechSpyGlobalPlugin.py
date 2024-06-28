@@ -16,7 +16,6 @@ from typing import (
 )
 
 import core
-import extensionPoints
 import globalPluginHandler
 import threading
 from .blockUntilConditionMet import (
@@ -105,6 +104,23 @@ class NVDASpyLib:
 			penultimateConf = penultimateConf[key]
 		ultimateKey = keyPath[-1]
 		penultimateConf[ultimateKey] = val
+
+	def assignGesture(
+			self,
+			gesture: str,
+			module: str,
+			className: str,
+			script: Optional[str],
+			replace: bool = False
+	):
+		import inputCore
+		inputCore.manager.userGestureMap.add(
+			gesture,
+			module,
+			className,
+			script,
+			replace,
+		)
 
 	fakeTranslations: typing.Optional[gettext.NullTranslations] = None
 

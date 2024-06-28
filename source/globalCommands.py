@@ -9,7 +9,6 @@
 
 import itertools
 from typing import (
-	List,
 	Optional,
 	Tuple,
 	Union,
@@ -43,6 +42,7 @@ import config
 from config.configFlags import (
 	TetherTo,
 	ShowMessages,
+	BrailleMode,
 )
 from config.featureFlag import FeatureFlag
 from config.featureFlagEnums import BoolFlag
@@ -121,6 +121,7 @@ SCRCAT_AUDIO = _("Audio")
 # Translators: Reported when there are no settings to configure in synth settings ring
 # (example: when there is no setting for language).
 NO_SETTINGS_MSG = _("No settings")
+
 
 class GlobalCommands(ScriptableObject):
 	"""Commands that are available at all times, regardless of the current focus.
@@ -261,6 +262,46 @@ class GlobalCommands(ScriptableObject):
 			mouseHandler.unlockRightMouseButton()
 		else:
 			mouseHandler.lockRightMouseButton()
+
+	@script(
+		description=_(
+			# Translators: Input help mode message for scroll up at the mouse position command.
+			"Scroll up at the mouse position"
+		),
+		category=SCRCAT_MOUSE
+	)
+	def script_mouseScrollUp(self, gesture: "inputCore.InputGesture") -> None:
+		mouseHandler.scrollMouseWheel(winUser.WHEEL_DELTA, isVertical=True)
+
+	@script(
+		description=_(
+			# Translators: Input help mode message for scroll down at the mouse position command.
+			"Scroll down at the mouse position"
+		),
+		category=SCRCAT_MOUSE
+	)
+	def script_mouseScrollDown(self, gesture: "inputCore.InputGesture") -> None:
+		mouseHandler.scrollMouseWheel(-winUser.WHEEL_DELTA, isVertical=True)
+
+	@script(
+		description=_(
+			# Translators: Input help mode message for scroll left at the mouse position command.
+			"Scroll left at the mouse position"
+		),
+		category=SCRCAT_MOUSE
+	)
+	def script_mouseScrollLeft(self, gesture: "inputCore.InputGesture") -> None:
+		mouseHandler.scrollMouseWheel(-winUser.WHEEL_DELTA, isVertical=False)
+
+	@script(
+		description=_(
+			# Translators: Input help mode message for scroll right at the mouse position command.
+			"Scroll right at the mouse position"
+		),
+		category=SCRCAT_MOUSE
+	)
+	def script_mouseScrollRight(self, gesture: "inputCore.InputGesture") -> None:
+		mouseHandler.scrollMouseWheel(winUser.WHEEL_DELTA, isVertical=False)
 
 	@script(
 		description=_(
@@ -1105,7 +1146,7 @@ class GlobalCommands(ScriptableObject):
 
 			try:
 				(left, top, width, height) = navigatorObject.location
-			except:
+			except:  # noqa: E722
 				# Translators: Reported when the object has no location for the mouse to move to it.
 				ui.message(_("Object has no location"))
 				return
@@ -1584,7 +1625,7 @@ class GlobalCommands(ScriptableObject):
 			realActionName=actionName
 			try:
 				realActionName=obj.getActionName()
-			except:
+			except:  # noqa: E722
 				pass
 			try:
 				obj.doAction()
@@ -2193,7 +2234,7 @@ class GlobalCommands(ScriptableObject):
 			for obj in itertools.chain((api.getFocusObject(),), reversed(api.getFocusAncestors())):
 				try:
 					obj.treeInterceptorClass
-				except:
+				except:  # noqa: E722
 					continue
 				break
 			else:
@@ -2470,7 +2511,7 @@ class GlobalCommands(ScriptableObject):
 
 		if objAtStart.annotations:
 			if _isDebugLogCatEnabled:
-				log.debug(f"NVDAObjectAtStart of caret has details")
+				log.debug("NVDAObjectAtStart of caret has details")
 			return objAtStart
 		elif api.getFocusObject():
 			# If fetching from the caret position fails, try via the focus object
@@ -3371,6 +3412,7 @@ class GlobalCommands(ScriptableObject):
 		category=SCRCAT_BRAILLE,
 		gesture="kb:NVDA+control+t"
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_toggleTether(self, gesture):
 		values = [x.value for x in TetherTo]
 		index = values.index(config.conf["braille"]["tetherTo"])
@@ -3389,11 +3431,37 @@ class GlobalCommands(ScriptableObject):
 		ui.message(_("Braille tethered %s") % TetherTo(newTetherChoice).displayString)
 
 	@script(
+		# Translators: Input help mode message for toggle braille mode command
+		description=_("Toggles braille mode"),
+		category=SCRCAT_BRAILLE,
+		gesture="kb:nvda+alt+t"
+	)
+	def script_toggleBrailleMode(self, gesture: inputCore.InputGesture):
+		curMode = BrailleMode(config.conf["braille"]["mode"])
+		modeList = list(BrailleMode)
+		index = modeList.index(curMode)
+		index = index + 1 if not index == len(modeList) - 1 else 0
+		newMode = modeList[index]
+		config.conf["braille"]["mode"] = newMode.value
+		if braille.handler.buffer == braille.handler.messageBuffer:
+			braille.handler._dismissMessage()
+		braille.handler.mainBuffer.clear()
+		# Translators: The message reported when switching braille modes
+		ui.message(_("Braille mode {brailleMode}").format(brailleMode=newMode.displayString))
+		if newMode == BrailleMode.SPEECH_OUTPUT:
+			return
+		if braille.handler.getTether() == TetherTo.REVIEW.value:
+			braille.handler.handleReviewMove(shouldAutoTether=braille.handler.shouldAutoTether)
+			return
+		braille.handler.handleGainFocus(api.getFocusObject())
+
+	@script(
 		# Translators: Input help mode message for cycle through
 		# braille move system caret when routing review cursor command.
 		description=_("Cycle through the braille move system caret when routing review cursor states"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_cycleReviewRoutingMovesSystemCaret(self, gesture: inputCore.InputGesture) -> None:
 		# If braille is not tethered to focus, set next state of
 		# braille Move system caret when routing review cursor.
@@ -3429,12 +3497,13 @@ class GlobalCommands(ScriptableObject):
 		description=_("Toggle the way context information is presented in braille"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_toggleFocusContextPresentation(self, gesture):
 		values = [x[0] for x in braille.focusContextPresentations]
 		labels = [x[1] for x in braille.focusContextPresentations]
 		try:
 			index = values.index(config.conf["braille"]["focusContextPresentation"])
-		except:
+		except:  # noqa: E722
 			index=0
 		newIndex = (index+1) % len(values)
 		config.conf["braille"]["focusContextPresentation"] = values[newIndex]
@@ -3450,6 +3519,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Toggle the braille cursor on and off"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_toggleShowCursor(self, gesture):
 		if config.conf["braille"]["showCursor"]:
 			# Translators: The message announced when toggling the braille cursor.
@@ -3468,6 +3538,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Cycle through the braille cursor shapes"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_cycleCursorShape(self, gesture):
 		if not config.conf["braille"]["showCursor"]:
 			# Translators: A message reported when changing the braille cursor shape when the braille cursor is turned off.
@@ -3480,7 +3551,7 @@ class GlobalCommands(ScriptableObject):
 			cursorShape = "cursorShapeReview"
 		try:
 			index = shapes.index(config.conf["braille"][cursorShape]) + 1
-		except:
+		except:  # noqa: E722
 			index = 1
 		if index >= len(braille.CURSOR_SHAPES):
 			index = 0
@@ -3494,6 +3565,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Cycle through the braille show messages modes"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_cycleShowMessages(self, gesture: inputCore.InputGesture) -> None:
 		"""Set next state of braille show messages and reports it with ui.message."""
 		values = [x.value for x in ShowMessages]
@@ -3511,6 +3583,7 @@ class GlobalCommands(ScriptableObject):
 		description=_("Cycle through the braille show selection states"),
 		category=SCRCAT_BRAILLE
 	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
 	def script_braille_cycleShowSelection(self, gesture: inputCore.InputGesture) -> None:
 		"""Set next state of braille show selection and reports it with ui.message."""
 		featureFlag: FeatureFlag = config.conf["braille"]["showSelection"]
@@ -3534,6 +3607,34 @@ class GlobalCommands(ScriptableObject):
 		ui.message(msg)
 
 	@script(
+		# Translators: Input help mode message for Braille Unicode normalization command.
+		description=_("Cycle through the braille Unicode normalization states"),
+		category=SCRCAT_BRAILLE
+	)
+	def script_braille_cycleUnicodeNormalization(self, gesture: inputCore.InputGesture) -> None:
+		featureFlag: FeatureFlag = config.conf["braille"]["unicodeNormalization"]
+		boolFlag: BoolFlag = featureFlag.enumClassType
+		values = [x.value for x in boolFlag]
+		currentValue = featureFlag.value.value
+		nextValueIndex = (currentValue % len(values)) + 1
+		nextName: str = boolFlag(nextValueIndex).name
+		config.conf["braille"]["unicodeNormalization"] = nextName
+		featureFlag = config.conf["braille"]["unicodeNormalization"]
+		if featureFlag.isDefault():
+			# Translators: Used when reporting braille Unicode normalization state
+			# (default behavior).
+			msg = _("Braille Unicode normalization default ({default})").format(
+				default=featureFlag.behaviorOfDefault.displayString
+			)
+		else:
+			# Translators: Used when reporting braille Unicode normalization state
+			# (disabled or enabled).
+			msg = _("Braille Unicode normalization {state}").format(
+				state=BoolFlag[nextName].displayString
+			)
+		ui.message(msg)
+
+	@script(
 		description=_(
 			# Translators: Input help mode message for report clipboard text command.
 			"Reports the text on the Windows clipboard. "
@@ -3547,7 +3648,7 @@ class GlobalCommands(ScriptableObject):
 	def script_reportClipboardText(self,gesture):
 		try:
 			text = api.getClipData()
-		except:
+		except:  # noqa: E722
 			text = None
 		if not text or not isinstance(text,str) or text.isspace():
 			# Translators: Presented when there is no text on the clipboard.
@@ -4309,6 +4410,34 @@ class GlobalCommands(ScriptableObject):
 		characterProcessing.clearSpeechSymbols()
 		ui.message(state)
 
+	@script(
+		# Translators: Input help mode message for speech Unicode normalization command.
+		description=_("Cycle through the speech Unicode normalization states"),
+		category=SCRCAT_SPEECH
+	)
+	def script_speech_cycleUnicodeNormalization(self, gesture: inputCore.InputGesture) -> None:
+		featureFlag: FeatureFlag = config.conf["speech"]["unicodeNormalization"]
+		boolFlag: BoolFlag = featureFlag.enumClassType
+		values = [x.value for x in boolFlag]
+		currentValue = featureFlag.value.value
+		nextValueIndex = (currentValue % len(values)) + 1
+		nextName: str = boolFlag(nextValueIndex).name
+		config.conf["speech"]["unicodeNormalization"] = nextName
+		featureFlag = config.conf["speech"]["unicodeNormalization"]
+		if featureFlag.isDefault():
+			# Translators: Used when reporting speech Unicode normalization state
+			# (default behavior).
+			msg = _("Speech Unicode normalization default ({default})").format(
+				default=featureFlag.behaviorOfDefault.displayString
+			)
+		else:
+			# Translators: Used when reporting speech Unicode normalization state
+			# (disabled or enabled).
+			msg = _("Speech Unicode normalization {state}").format(
+				state=BoolFlag[nextName].displayString
+			)
+		ui.message(msg)
+
 	_tempEnableScreenCurtain = True
 	_waitingOnScreenCurtainWarningDialog: Optional[wx.Dialog] = None
 	_toggleScreenCurtainMessage: Optional[str] = None
@@ -4475,7 +4604,7 @@ class GlobalCommands(ScriptableObject):
 		gesture="kb:NVDA+alt+s",
 	)
 	def script_cycleSoundSplit(self, gesture: "inputCore.InputGesture") -> None:
-		audio.toggleSoundSplitState()
+		audio._toggleSoundSplitState()
 
 
 #: The single global commands instance.
@@ -4529,7 +4658,7 @@ class ConfigProfileActivationCommands(ScriptableObject):
 		@param name: The name of the profile to add a script for.
 		@type name: str
 		"""
-		script = lambda self, gesture: cls._profileScript(name)
+		script = lambda self, gesture: cls._profileScript(name)  # noqa: E731
 		funcName = script.__name__ = "script_%s" % cls._getScriptNameForProfile(name)
 		# Just set the doc string of the script, using the decorator is overkill here.
 		# Translators: The description shown in input help for a script that
@@ -4568,7 +4697,7 @@ class ConfigProfileActivationCommands(ScriptableObject):
 				gestureMap.add(gesture, moduleName, className, newScriptName)
 		try:
 			gestureMap.save()
-		except:
+		except:  # noqa: E722
 			log.debugWarning("Couldn't save user gesture map after renaming profile script", exc_info=True)
 
 	@classmethod

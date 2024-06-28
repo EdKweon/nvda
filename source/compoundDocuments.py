@@ -6,6 +6,7 @@
 from typing import (
 	Optional,
 	Dict,
+	Self,
 )
 
 import textUtils
@@ -19,12 +20,9 @@ from treeInterceptorHandler import DocumentTreeInterceptor
 import speech
 import braille
 from NVDAObjects import behaviors
-import api
-import config
 import review
 import vision
 from logHandler import log
-from locationHelper import RectLTWH
 
 class CompoundTextInfo(textInfos.TextInfo):
 
@@ -202,6 +200,22 @@ class CompoundTextInfo(textInfos.TextInfo):
 
 	def __ne__(self, other):
 		return not self == other
+	
+	def moveToCodepointOffset(
+			self,
+			codepointOffset: int,
+	) -> Self:
+		if self._start == self._end:
+			# This is an optimization: if nested TextInfo is an OffsetsTextInfo,
+			# it will do the job faster.
+			nested = self._start.moveToCodepointOffset(codepointOffset)
+			result = self.copy()
+			result._start = result._end = nested
+			return result
+		else:
+			return super().moveToCodepointOffset(codepointOffset)
+
+
 
 class TreeCompoundTextInfo(CompoundTextInfo):
 	#: Units contained within a single TextInfo.

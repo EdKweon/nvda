@@ -1,6 +1,6 @@
 # A part of NonVisual Desktop Access (NVDA)
 # Copyright (C) 2012-2024 Rui Batista, NV Access Limited, Noelia Ruiz Martínez,
-# Joseph Lee, Babbage B.V., Arnold Loubriat, Łukasz Golonka, Leonard de Ruijter
+# Joseph Lee, Babbage B.V., Arnold Loubriat, Łukasz Golonka, Leonard de Ruijter, Julien Cochuyt
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
@@ -395,7 +395,7 @@ def _getAvailableAddonsFromPath(
 						log.debugWarning("Add-on %s is considered incompatible", name)
 						state[AddonStateCategory.BLOCKED].add(a.name)
 					yield a
-				except:
+				except:  # noqa: E722
 					log.error("Error loading Addon from path: %s", addon_path, exc_info=True)
 
 _availableAddons = collections.OrderedDict()
@@ -568,7 +568,7 @@ class Addon(AddonBase):
 				# translations can be used in installTasks module.
 				_availableAddons[self.path] = self
 				self.runInstallTask("onUninstall")
-			except:
+			except:  # noqa: E722
 				log.error("task 'onUninstall' on addon '%s' failed"%self.name,exc_info=True)
 			finally:
 				del _availableAddons[self.path]
@@ -998,6 +998,15 @@ url = string(default=None)
 # Name of default documentation file for the add-on.
 docFileName = string(default=None)
 
+# Custom braille tables
+[brailleTables]
+	# The key is the table file name (not the full path)
+	[[__many__]]
+		displayName = string()
+		contracted = boolean(default=false)
+		input = boolean(default=true)
+		output = boolean(default=true)
+
 # NOTE: apiVersion:
 # EG: 2019.1.0 or 0.0.0
 # Must have 3 integers separated by dots.
@@ -1014,13 +1023,13 @@ docFileName = string(default=None)
 		@param translatedInput: translated manifest input
 		@type translatedInput: file-like object
 		"""
-		super(AddonManifest, self).__init__(input, configspec=self.configspec, encoding='utf-8', default_encoding='utf-8')
+		super().__init__(input, configspec=self.configspec, encoding='utf-8', default_encoding='utf-8')
 		self._errors = None
 		val = Validator({"apiVersion":validate_apiVersionString})
 		result = self.validate(val, copy=True, preserve_errors=True)
-		if result != True:
+		if result != True:  # noqa: E712
 			self._errors = result
-		elif True != self._validateApiVersionRange():
+		elif True != self._validateApiVersionRange():  # noqa: E712
 			self._errors = "Constraint not met: minimumNVDAVersion ({}) <= lastTestedNVDAVersion ({})".format(
 				self.get("minimumNVDAVersion"),
 				self.get("lastTestedNVDAVersion")
@@ -1032,6 +1041,10 @@ docFileName = string(default=None)
 				val=self._translatedConfig.get(k)
 				if val:
 					self[k]=val
+			for fileName, tableConfig in self._translatedConfig.get("brailleTables", {}).items():
+				value = tableConfig.get("displayName")
+				if value:
+					self["brailleTables"][fileName]["displayName"] = value
 
 	@property
 	def errors(self):
