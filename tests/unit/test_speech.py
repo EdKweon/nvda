@@ -10,12 +10,15 @@ import typing
 import unittest
 
 import config
+from characterProcessing import processSpeechSymbol
 from speech import (
 	_getSpellingCharAddCapNotification,
 	_getSpellingSpeechAddCharMode,
 	_getSpellingSpeechWithoutCharMode,
 	cancelSpeech,
+	pauseSpeech,
 	speechCanceled,
+	post_speechPaused,
 )
 from speech.commands import (
 	BeepCommand,
@@ -524,6 +527,64 @@ class Test_getSpellingSpeechWithoutCharMode(unittest.TestCase):
 		)
 		self.assertEqual(repr(list(output)), expected)
 
+	def test_normalizedInSymbolDict_normalizeOff(self):
+		expected = repr(
+			[
+				"·",
+				EndUtteranceCommand(),
+			],
+		)
+		output = _getSpellingSpeechWithoutCharMode(
+			text="·",
+			locale="en",
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=False,
+			reportNormalizedForCharacterNavigation=False,
+		)
+		self.assertEqual(repr(list(output)), expected)
+
+	def test_normalizedInSymbolDict_normalizeOnDontReport(self):
+		expected = repr(
+			[
+				processSpeechSymbol("en", "·"),
+				EndUtteranceCommand(),
+			],
+		)
+		output = _getSpellingSpeechWithoutCharMode(
+			text="·",
+			locale="en",
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=True,
+			reportNormalizedForCharacterNavigation=False,
+		)
+		self.assertEqual(repr(list(output)), expected)
+
+	def test_normalizedInSymbolDict_normalizeOnReport(self):
+		expected = repr(
+			[
+				processSpeechSymbol("en", "·"),
+				" normalized",
+				EndUtteranceCommand(),
+			],
+		)
+		output = _getSpellingSpeechWithoutCharMode(
+			text="·",
+			locale="en",
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=True,
+			reportNormalizedForCharacterNavigation=True,
+		)
+		self.assertEqual(repr(list(output)), expected)
+
 
 class SpeechExtensionPoints(unittest.TestCase):
 	def test_speechCanceledExtensionPoint(self):
@@ -532,3 +593,10 @@ class SpeechExtensionPoints(unittest.TestCase):
 			speechCanceled,
 		):
 			cancelSpeech()
+
+	def test_post_speechPausedExtensionPoint(self):
+		with actionTester(self, post_speechPaused, switch=True):
+			pauseSpeech(True)
+
+		with actionTester(self, post_speechPaused, switch=False):
+			pauseSpeech(False)

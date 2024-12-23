@@ -306,10 +306,17 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 		brailleDots = arg[0]
 		key = arg[1] | (arg[2] << 8)
 		gestures = []
-		if key:
-			gestures.append(InputGesture(keys=key))
 		if brailleDots:
-			gestures.append(InputGesture(dots=brailleDots))
+			if key in (1, 2, 3):  # bk:space+dots
+				gestures.append(InputGesture(dots=brailleDots, space=key))
+				key = 0
+			else:  # bk:dots
+				gestures.append(InputGesture(dots=brailleDots, space=0))
+		if key:
+			if key in (1, 2):  # bk:space
+				gestures.append(InputGesture(dots=0, space=key))
+			else:  # br(seikantk):XXX
+				gestures.append(InputGesture(keys=key))
 		for gesture in gestures:
 			try:
 				inputCore.manager.executeGesture(gesture)
@@ -343,7 +350,6 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 				"kb:shift+rightArrow": ("br(seikantk):SPACE+RJ_RIGHT", "br(seikantk):BACKSPACE+RJ_RIGHT"),
 				"kb:escape": ("br(seikantk):SPACE+RJ_CENTER",),
 				"kb:windows": ("br(seikantk):BACKSPACE+RJ_CENTER",),
-				"kb:space": ("br(seikantk):BACKSPACE", "br(seikantk):SPACE"),
 				"kb:backspace": ("br(seikantk):d7",),
 				"kb:pageup": ("br(seikantk):SPACE+LJ_RIGHT",),
 				"kb:pagedown": ("br(seikantk):SPACE+LJ_LEFT",),
@@ -385,7 +391,7 @@ def _getRoutingIndexes(routingKeyBytes: bytes) -> Set[int]:
 class InputGesture(braille.BrailleDisplayGesture, brailleInput.BrailleInputGesture):
 	source = BrailleDisplayDriver.name
 
-	def __init__(self, keys=None, dots=None, space=False, routing=None):
+	def __init__(self, keys=None, dots=None, space=0, routing=None):
 		super(braille.BrailleDisplayGesture, self).__init__()
 		# see what thumb keys are pressed:
 		names = set()
@@ -394,8 +400,8 @@ class InputGesture(braille.BrailleDisplayGesture, brailleInput.BrailleInputGestu
 		elif dots is not None:
 			self.dots = dots
 			if space:
-				self.space = space
-				names.add(_keyNames[1])
+				self.space = bool(space)
+				names.update(_getKeyNames(space, _keyNames))
 			names.update(_getKeyNames(dots, _dotNames))
 		elif routing is not None:
 			self.routingIndex = routing

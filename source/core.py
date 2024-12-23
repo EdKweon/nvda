@@ -24,6 +24,7 @@ from enum import Enum
 import logHandler
 import languageHandler
 import globalVars
+import argsParsing
 from logHandler import log
 import addonHandler
 import extensionPoints
@@ -214,6 +215,28 @@ class NewNVDAInstance:
 	directory: Optional[str] = None
 
 
+def computeRestartCLIArgs(removeArgsList: list[str] | None = None) -> list[str]:
+	"""Generate an equivalent list of CLI arguments from the values in globalVars.appArgs.
+	:param removeArgsList: A list of values to ignore when looking in globalVars.appArgs.
+	"""
+
+	parser = argsParsing.getParser()
+	if not removeArgsList:
+		removeArgsList = []
+	args = []
+	for arg, val in globalVars.appArgs._get_kwargs():
+		if val == parser.get_default(arg):
+			continue
+		if arg in removeArgsList:
+			continue
+		flag = [a.option_strings[0] for a in parser._actions if a.dest == arg][0]
+		args.append(flag)
+		if isinstance(val, bool):
+			continue
+		args.append(f"{val}")
+	return args
+
+
 def restartUnsafely():
 	"""Start a new copy of NVDA immediately.
 	Used as a last resort, in the event of a serious error to immediately restart NVDA without running any
@@ -239,13 +262,16 @@ def restartUnsafely():
 			sys.argv.remove(paramToRemove)
 		except ValueError:
 			pass
+	restartCLIArgs = computeRestartCLIArgs(
+		removeArgsList=["easeOfAccess"],
+	)
 	options = []
 	if NVDAState.isRunningAsSource():
 		options.append(os.path.basename(sys.argv[0]))
 	_startNewInstance(
 		NewNVDAInstance(
 			sys.executable,
-			subprocess.list2cmdline(options + sys.argv[1:]),
+			subprocess.list2cmdline(options + restartCLIArgs),
 			globalVars.appDir,
 		),
 	)
@@ -260,15 +286,9 @@ def restart(disableAddons=False, debugLogging=False):
 		return
 	import subprocess
 
-	for paramToRemove in (
-		"--disable-addons",
-		"--debug-logging",
-		"--ease-of-access",
-	) + languageHandler.getLanguageCliArgs():
-		try:
-			sys.argv.remove(paramToRemove)
-		except ValueError:
-			pass
+	restartCLIArgs = computeRestartCLIArgs(
+		removeArgsList=["disableAddons", "debugLogging", "language", "easeOfAccess"],
+	)
 	options = []
 	if NVDAState.isRunningAsSource():
 		options.append(os.path.basename(sys.argv[0]))
@@ -280,7 +300,7 @@ def restart(disableAddons=False, debugLogging=False):
 	if not triggerNVDAExit(
 		NewNVDAInstance(
 			sys.executable,
-			subprocess.list2cmdline(options + sys.argv[1:]),
+			subprocess.list2cmdline(options + restartCLIArgs),
 			globalVars.appDir,
 		),
 	):
@@ -294,6 +314,7 @@ def resetConfiguration(factoryDefaults=False):
 	import brailleInput
 	import brailleTables
 	import speech
+	import characterProcessing
 	import vision
 	import inputCore
 	import bdDetect
@@ -311,10 +332,12 @@ def resetConfiguration(factoryDefaults=False):
 	brailleTables.terminate()
 	log.debug("terminating speech")
 	speech.terminate()
+	log.debug("terminating character processing")
+	characterProcessing.terminate()
 	log.debug("terminating tones")
 	tones.terminate()
 	log.debug("terminating sound split")
-	audio.soundSplit.terminate()
+	audio.terminate()
 	log.debug("Terminating background braille display detection")
 	bdDetect.terminate()
 	log.debug("Terminating background i/o")
@@ -346,8 +369,11 @@ def resetConfiguration(factoryDefaults=False):
 	# Tones
 	tones.initialize()
 	# Sound split
-	log.debug("initializing sound split")
-	audio.soundSplit.initialize()
+	log.debug("initializing audio")
+	audio.initialize()
+	# Character processing
+	log.debug("initializing character processing")
+	characterProcessing.initialize()
 	# Speech
 	log.debug("initializing speech")
 	speech.initialize()
@@ -739,11 +765,15 @@ def main():
 	log.debug("Initializing sound split")
 	import audio
 
-	audio.soundSplit.initialize()
+	audio.initialize()
 	import speechDictHandler
 
 	log.debug("Speech Dictionary processing")
 	speechDictHandler.initialize()
+	import characterProcessing
+
+	log.debug("Character processing")
+	characterProcessing.initialize()
 	import speech
 
 	log.debug("Initializing speech")
@@ -880,12 +910,15 @@ def main():
 	):
 		import gui.installerGui
 
+		isUpdate = gui.installerGui._nvdaExistsInDir(globalVars.appArgs.portablePath)
+		# If we are updating, we don't want to warn for non-empty directory.
+		warnForNonEmptyDirectory = not isUpdate and not globalVars.appArgs.createPortableSilent
 		wx.CallAfter(
 			gui.installerGui.doCreatePortable,
 			portableDirectory=globalVars.appArgs.portablePath,
 			silent=globalVars.appArgs.createPortableSilent,
 			startAfterCreate=not globalVars.appArgs.createPortableSilent,
-			warnForNonEmptyDirectory=not globalVars.appArgs.createPortableSilent,
+			warnForNonEmptyDirectory=warnForNonEmptyDirectory,
 		)
 	elif not globalVars.appArgs.minimal:
 		try:
@@ -1044,6 +1077,7 @@ def main():
 	_terminate(braille)
 	_terminate(brailleTables)
 	_terminate(speech)
+	_terminate(characterProcessing)
 	_terminate(bdDetect)
 	_terminate(hwIo)
 	_terminate(addonHandler)
@@ -1070,10 +1104,21 @@ def main():
 			pass
 	# We cannot terminate nvwave until after we perform nvwave.playWaveFile
 	_terminate(nvwave)
-	# #5189: Destroy the message window as late as possible
+	_terminate(NVDAHelper)
+	# Log and join any remaining non-daemon threads here,
+	# before releasing our mutex and exiting.
+	# In a perfect world there should be none.
+	# If we don't do this, the NvDA process may stay alive after the mutex is released,
+	# which would cause issues for rpc / nvdaHelper.
+	# See issue #16933.
+	for thr in threading.enumerate():
+		if not thr.daemon and thr is not threading.current_thread():
+			log.info(f"Waiting on {thr}...")
+			thr.join()
+			log.info(f"Thread {thr.name} complete")
+	# #5189: Destroy the message window as the very last action
 	# so new instances of NVDA can find this one even if it freezes during exit.
 	messageWindow.destroy()
-	_terminate(NVDAHelper)
 	log.debug("core done")
 
 

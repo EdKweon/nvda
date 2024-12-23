@@ -13,6 +13,7 @@ import typing
 from typing import (
 	Dict,
 	Optional,
+	TYPE_CHECKING,
 )
 import weakref
 import textUtils
@@ -44,6 +45,9 @@ import brailleInput
 import locationHelper
 import aria
 from winAPI.sessionTracking import isLockScreenModeActive
+
+if TYPE_CHECKING:
+	from utils.urlUtils import _LinkData
 
 
 class NVDAObjectTextInfo(textInfos.offsets.OffsetsTextInfo):
@@ -84,7 +88,7 @@ class DynamicNVDAObjectType(baseObject.ScriptableObject.__class__):
 		if chooseBestAPI:
 			APIClass = self.findBestAPIClass(kwargs)
 			if not APIClass:
-				return None  # noqa: E701
+				return None
 		else:
 			APIClass = self
 
@@ -316,19 +320,30 @@ class NVDAObject(
 
 	beTransparentToMouse = False  #:If true then NVDA will never consider the mouse to be on this object, rather it will be on an ancestor.
 
+	def objectFromPointRedirect(self, x: int, y: int) -> "NVDAObject | None":
+		"""Redirects NVDA to another object if this object is retrieved from on-screen coordinates.
+		:param x: the x coordinate.
+		:param y: the y coordinate.
+		:return: The object that NVDA should be redirected to.
+		"""
+		return
+
 	@staticmethod
-	def objectFromPoint(x, y):
+	def objectFromPoint(x: int, y: int) -> "NVDAObject":
 		"""Retrieves an NVDAObject instance representing a control in the Operating System at the given x and y coordinates.
-		@param x: the x coordinate.
-		@type x: int
-		@param y: the y coordinate.
-		@param y: int
-		@return: The object at the given x and y coordinates.
-		@rtype: L{NVDAObject}
+		:param x: the x coordinate.
+		:param y: the y coordinate.
+		:return: The object at the given x and y coordinates.
 		"""
 		kwargs = {}
 		APIClass = NVDAObject.findBestAPIClass(kwargs, relation=(x, y))
-		return APIClass(chooseBestAPI=False, **kwargs) if APIClass else None
+		obj = APIClass(chooseBestAPI=False, **kwargs) if APIClass else None
+		if not obj:
+			return
+		redirect = obj.objectFromPointRedirect(x, y)
+		if redirect:
+			obj = redirect
+		return obj
 
 	@staticmethod
 	def objectWithFocus():
@@ -1012,7 +1027,7 @@ class NVDAObject(
 			return None
 		presType = child.presentationType
 		if presType != self.presType_content:
-			return child._findSimpleNext(useChild=(presType != self.presType_unavailable), useParent=False)  # noqa: E701
+			return child._findSimpleNext(useChild=(presType != self.presType_unavailable), useParent=False)
 		return child
 
 	def _get_simpleLastChild(self):
@@ -1025,7 +1040,7 @@ class NVDAObject(
 				useChild=(presType != self.presType_unavailable),
 				useParent=False,
 				goPrevious=True,
-			)  # noqa: E701
+			)
 		return child
 
 	def _get_childCount(self):
@@ -1616,3 +1631,24 @@ class NVDAObject(
 		if not isLockScreenModeActive():
 			return False
 		return _isObjectBelowLockScreen(self)
+
+	linkType: controlTypes.State | None
+	"""Typing information for auto property _get_linkType
+	Determines the link type based on the link and document URLs.
+	"""
+
+	def _get_linkType(self) -> controlTypes.State | None:
+		if self.role != controlTypes.Role.LINK:
+			return None
+		from browseMode import BrowseModeDocumentTreeInterceptor
+
+		ti = getattr(self, "treeInterceptor", None)
+		if not isinstance(ti, BrowseModeDocumentTreeInterceptor):
+			return None
+		return ti.getLinkTypeInDocument(self.value)
+
+	linkData: "_LinkData | None"
+
+	def _get_linkData(self) -> "_LinkData | None":
+		"""If the object has an associated link, returns the link's data (target and text)."""
+		raise NotImplementedError

@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2006-2022 NV Access Limited, Babbage B.V., Accessolutions, Julien Cochuyt
+# Copyright (C) 2006-2024 NV Access Limited, Babbage B.V., Accessolutions, Julien Cochuyt, Cyrille Bougot
 
 """Framework for accessing text content in widgets.
 The core component of this framework is the L{TextInfo} class.
@@ -30,6 +30,7 @@ import controlTypes
 from controlTypes import OutputReason
 import locationHelper
 from logHandler import log
+from utils.urlUtils import _LinkData
 
 if typing.TYPE_CHECKING:
 	import documentBase  # noqa: F401 used for type checking only
@@ -369,7 +370,7 @@ class TextInfo(baseObject.AutoPropertyObject):
 		@param obj: The object containing the range of text being represented.
 		"""
 		super(TextInfo, self).__init__()
-		self._obj = weakref.ref(obj) if type(obj) != weakref.ProxyType else obj
+		self._obj = weakref.ref(obj) if type(obj) is not weakref.ProxyType else obj
 		#: The position with which this instance was constructed.
 		self.basePosition = position
 
@@ -704,12 +705,35 @@ class TextInfo(baseObject.AutoPropertyObject):
 		mouseHandler.doPrimaryClick()
 		winUser.setCursorPos(oldX, oldY)
 
+	def _getLinkDataAtCaretPosition(self) -> _LinkData | None:
+		self.expand(UNIT_CHARACTER)
+		obj: NVDAObjects.NVDAObject = self.NVDAObjectAtStart
+		if obj.role == controlTypes.role.Role.GRAPHIC and (
+			obj.parent and obj.parent.role == controlTypes.role.Role.LINK
+		):
+			# In Firefox, graphics with a parent link also expose the parents link href value.
+			# In Chromium, the link href value must be fetched from the parent object. (#14779)
+			obj = obj.parent
+		if (
+			obj.role == controlTypes.role.Role.LINK  # If it's a link, or
+			or controlTypes.state.State.LINKED in obj.states  # if it isn't a link but contains one
+		):
+			return _LinkData(
+				displayText=obj.name,
+				destination=obj.value,
+			)
+		return None
+
 	def getMathMl(self, field):
 		"""Get MathML for a math control field.
 		This will only be called for control fields with a role of L{controlTypes.Role.MATH}.
 		@raise LookupError: If MathML can't be retrieved for this field.
 		"""
 		raise NotImplementedError
+
+	def _getTextForCodepointMovement(self) -> str:
+		"""Gets the text as used in moveToCodepointOffset."""
+		return self.text
 
 	def moveToCodepointOffset(
 		self,
@@ -803,7 +827,7 @@ class TextInfo(baseObject.AutoPropertyObject):
 			we reduce the count of characters in order to make sure
 			the algorithm makes some progress on each iteration.
 		"""
-		text = self.text
+		text = self._getTextForCodepointMovement()
 		if codepointOffset < 0 or codepointOffset > len(text):
 			raise ValueError
 		if codepointOffset == 0 or codepointOffset == len(text):
@@ -845,7 +869,7 @@ class TextInfo(baseObject.AutoPropertyObject):
 					moveCharacters = codepointOffsetLeft
 				code = tmpInfo.move(UNIT_CHARACTER, moveCharacters, endPoint="end")
 				lastMove = moveCharacters
-				tmpText = tmpInfo.text
+				tmpText = tmpInfo._getTextForCodepointMovement()
 				actualCodepointOffset = len(tmpText)
 				if not text.startswith(tmpText):
 					raise RuntimeError(
@@ -865,7 +889,7 @@ class TextInfo(baseObject.AutoPropertyObject):
 					moveCharacters = -codepointOffsetRight
 				code = tmpInfo.move(UNIT_CHARACTER, moveCharacters, endPoint="start")
 				lastMove = moveCharacters
-				tmpText = tmpInfo.text
+				tmpText = tmpInfo._getTextForCodepointMovement()
 				actualCodepointOffset = totalCodepointOffset - len(tmpText)
 				if not text.endswith(tmpText):
 					raise RuntimeError(

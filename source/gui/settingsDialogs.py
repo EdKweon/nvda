@@ -1,10 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
 # Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy,
 # Rui Batista, Joseph Lee, Heiko Folkerts, Zahari Yurukov, Leonard de Ruijter,
-# Derek Riemer, Babbage B.V., Davy Kager, Ethan Holliger, Bill Dengler, Thomas Stivers,
-# Julien Cochuyt, Peter Vágner, Cyrille Bougot, Mesar Hameed, Łukasz Golonka, Aaron Cannon,
-# Adriani90, André-Abush Clause, Dawid Pieper, Heiko Folkerts, Takuya Nishimoto, Thomas Stivers,
-# jakubl7545, mltony, Rob Meredith, Burman's Computer and Education Ltd, hwf1324.
+# Derek Riemer, Babbage B.V., Davy Kager, Ethan Holliger, Bill Dengler,
+#  Thomas Stivers, Julien Cochuyt, Peter Vágner, Cyrille Bougot, Mesar Hameed,
+# Łukasz Golonka, Aaron Cannon, Adriani90, André-Abush Clause, Dawid Pieper,
+# Takuya Nishimoto, jakubl7545, Tony Malykh, Rob Meredith,
+# Burman's Computer and Education Ltd, hwf1324.
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 import logging
@@ -15,6 +16,7 @@ from enum import IntEnum
 from locale import strxfrm
 import re
 import typing
+import requests
 import wx
 from NVDAState import WritePaths
 
@@ -31,9 +33,11 @@ from config.configFlags import (
 	NVDAKey,
 	ShowMessages,
 	TetherTo,
+	ParagraphStartMarker,
 	ReportLineIndentation,
 	ReportTableHeaders,
 	ReportCellBorders,
+	OutputMode,
 )
 import languageHandler
 import speech
@@ -107,7 +111,7 @@ class SettingsDialog(
 	"""
 
 	class MultiInstanceError(RuntimeError):
-		pass  # noqa: E701
+		pass
 
 	class MultiInstanceErrorWithDialog(MultiInstanceError):
 		dialog: "SettingsDialog"
@@ -495,7 +499,7 @@ class MultiCategorySettingsDialog(SettingsDialog):
 	categoryClasses: typing.List[typing.Type[SettingsPanel]] = []
 
 	class CategoryUnavailableError(RuntimeError):
-		pass  # noqa: E701
+		pass
 
 	def __init__(self, parent, initialCategory=None):
 		"""
@@ -796,16 +800,9 @@ class GeneralSettingsPanel(SettingsPanel):
 		self.languageNames = languageHandler.getAvailableLanguages(presentational=True)
 		languageChoices = [x[1] for x in self.languageNames]
 		if languageHandler.isLanguageForced():
-			try:
-				cmdLangDescription = next(
-					ld for code, ld in self.languageNames if code == globalVars.appArgs.language
-				)
-			except StopIteration:
-				# In case --lang=Windows is passed to the command line, globalVars.appArgs.language is the current
-				# Windows language,, which may not be in the list of NVDA supported languages, e.g. Windows language may
-				# be 'fr_FR' but NVDA only supports 'fr'.
-				# In this situation, only use language code as a description.
-				cmdLangDescription = globalVars.appArgs.language
+			cmdLangDescription = next(
+				ld for code, ld in self.languageNames if code == globalVars.appArgs.language
+			)
 			languageChoices.append(
 				# Translators: Shown for a language which has been provided from the command line
 				# 'langDesc' would be replaced with description of the given locale.
@@ -822,9 +819,6 @@ class GeneralSettingsPanel(SettingsPanel):
 			choices=languageChoices,
 		)
 		self.bindHelpEvent("GeneralSettingsLanguage", self.languageList)
-		self.languageList.SetToolTip(
-			wx.ToolTip("Choose the language NVDA's messages and user interface should be presented in."),
-		)
 		self.oldLanguage = config.conf["general"]["language"]
 		if languageHandler.isLanguageForced():
 			index = len(self.languageNames) - 1
@@ -918,6 +912,7 @@ class GeneralSettingsPanel(SettingsPanel):
 		if globalVars.appArgs.secure or not config.isInstalledCopy():
 			self.copySettingsButton.Disable()
 		settingsSizerHelper.addItem(self.copySettingsButton)
+
 		if updateCheck:
 			item = self.autoCheckForUpdatesCheckBox = wx.CheckBox(
 				self,
@@ -952,6 +947,66 @@ class GeneralSettingsPanel(SettingsPanel):
 			if globalVars.appArgs.secure:
 				item.Disable()
 			settingsSizerHelper.addItem(item)
+
+			# Translators: The label for the update mirror on the General Settings panel.
+			mirrorBoxSizer = wx.StaticBoxSizer(wx.HORIZONTAL, self, label=_("Update mirror"))
+			mirrorBox = mirrorBoxSizer.GetStaticBox()
+			mirrorBoxSizerHelper = guiHelper.BoxSizerHelper(self, sizer=mirrorBoxSizer)
+			settingsSizerHelper.addItem(mirrorBoxSizerHelper)
+
+			# Use an ExpandoTextCtrl because even when read-only it accepts focus from keyboard, which
+			# standard read-only TextCtrl does not. ExpandoTextCtrl is a TE_MULTILINE control, however
+			# by default it renders as a single line. Standard TextCtrl with TE_MULTILINE has two lines,
+			# and a vertical scroll bar. This is not neccessary for the single line of text we wish to
+			# display here.
+			# Note: To avoid code duplication, the value of this text box will be set in `onPanelActivated`.
+			self.mirrorURLTextBox = ExpandoTextCtrl(
+				mirrorBox,
+				size=(self.scaleSize(250), -1),
+				style=wx.TE_READONLY,
+			)
+			# Translators: This is the label for the button used to change the NVDA update mirror URL,
+			# it appears in the context of the update mirror group on the General page of NVDA's settings.
+			changeMirrorBtn = wx.Button(mirrorBox, label=_("Change..."))
+			mirrorBoxSizerHelper.addItem(
+				guiHelper.associateElements(
+					self.mirrorURLTextBox,
+					changeMirrorBtn,
+				),
+			)
+			self.bindHelpEvent("UpdateMirror", mirrorBox)
+			self.mirrorURLTextBox.Bind(wx.EVT_CHAR_HOOK, self._enterTriggersOnChangeMirrorURL)
+			changeMirrorBtn.Bind(wx.EVT_BUTTON, self.onChangeMirrorURL)
+			if globalVars.appArgs.secure:
+				mirrorBox.Disable()
+
+	def onChangeMirrorURL(self, evt: wx.CommandEvent | wx.KeyEvent):
+		"""Show the dialog to change the update mirror URL, and refresh the dialog in response to the URL being changed."""
+		# Import late to avoid circular dependency.
+		from gui._SetURLDialog import _SetURLDialog
+
+		changeMirror = _SetURLDialog(
+			self,
+			# Translators: Title of the dialog used to change NVDA's update server mirror URL.
+			title=_("Set NVDA Update Mirror"),
+			configPath=("update", "serverURL"),
+			helpId="SetURLDialog",
+			urlTransformer=lambda url: f"{url}?versionType=stable",
+		)
+		ret = changeMirror.ShowModal()
+		if ret == wx.ID_OK:
+			self.Freeze()
+			# trigger a refresh of the settings
+			self.onPanelActivated()
+			self._sendLayoutUpdatedEvent()
+			self.Thaw()
+
+	def _enterTriggersOnChangeMirrorURL(self, evt: wx.KeyEvent):
+		"""Open the change update mirror URL dialog in response to the enter key in the mirror URL read-only text box."""
+		if evt.KeyCode == wx.WXK_RETURN:
+			self.onChangeMirrorURL(evt)
+		else:
+			evt.Skip()
 
 	def onCopySettings(self, evt):
 		if os.path.isdir(WritePaths.addonsDir) and 0 < len(os.listdir(WritePaths.addonsDir)):
@@ -1046,8 +1101,25 @@ class GeneralSettingsPanel(SettingsPanel):
 			updateCheck.terminate()
 			updateCheck.initialize()
 
+	def onPanelActivated(self):
+		if updateCheck:
+			self._updateCurrentMirrorURL()
+		super().onPanelActivated()
+
+	def _updateCurrentMirrorURL(self):
+		self.mirrorURLTextBox.SetValue(
+			(
+				url
+				if (url := config.conf["update"]["serverURL"])
+				# Translators: A value that appears in NVDA's Settings to indicate that no mirror is in use.
+				else _("No mirror")
+			),
+		)
+
 	def postSave(self):
 		if self.oldLanguage != config.conf["general"]["language"]:
+			config.conf["braille"]["translationTable"] = "auto"
+			config.conf["braille"]["inputTable"] = "auto"
 			LanguageRestartDialog(self).ShowModal()
 
 
@@ -1667,23 +1739,10 @@ class VoiceSettingsPanel(AutoSettingsMixin, SettingsPanel):
 			config.conf["speech"]["reportNormalizedForCharacterNavigation"],
 		)
 		self.reportNormalizedForCharacterNavigationCheckBox.Enable(
-			bool(self.unicodeNormalizationCombo._getControlCurrentFlag())
+			bool(self.unicodeNormalizationCombo._getControlCurrentFlag()),
 		)
 
-		includeCLDRText = _(
-			# Translators: This is the label for a checkbox in the
-			# voice settings panel (if checked, data from the unicode CLDR will be used
-			# to speak emoji descriptions).
-			"Include Unicode Consortium data (including emoji) when processing characters and symbols",
-		)
-		self.includeCLDRCheckbox = settingsSizerHelper.addItem(
-			wx.CheckBox(self, label=includeCLDRText),
-		)
-		self.bindHelpEvent(
-			"SpeechSettingsCLDR",
-			self.includeCLDRCheckbox,
-		)
-		self.includeCLDRCheckbox.SetValue(config.conf["speech"]["includeCLDR"])
+		self._appendSymbolDictionariesList(settingsSizerHelper)
 
 		self._appendDelayedCharacterDescriptions(settingsSizerHelper)
 
@@ -1751,6 +1810,22 @@ class VoiceSettingsPanel(AutoSettingsMixin, SettingsPanel):
 		)
 		self._appendSpeechModesList(settingsSizerHelper)
 
+	def _appendSymbolDictionariesList(self, settingsSizerHelper: guiHelper.BoxSizerHelper) -> None:
+		self._availableSymbolDictionaries = [
+			d for d in characterProcessing.listAvailableSymbolDictionaryDefinitions() if d.userVisible
+		]
+		self.symbolDictionariesList: nvdaControls.CustomCheckListBox = settingsSizerHelper.addLabeledControl(
+			# Translators: Label of the list where user can enable or disable symbol dictionaires.
+			_("E&xtra dictionaries for character and symbol processing:"),
+			nvdaControls.CustomCheckListBox,
+			choices=[d.displayName for d in self._availableSymbolDictionaries],
+		)
+		self.bindHelpEvent("SpeechSymbolDictionaries", self.symbolDictionariesList)
+		self.symbolDictionariesList.CheckedItems = [
+			i for i, d in enumerate(self._availableSymbolDictionaries) if d.enabled
+		]
+		self.symbolDictionariesList.Select(0)
+
 	def _appendSpeechModesList(self, settingsSizerHelper: guiHelper.BoxSizerHelper) -> None:
 		self._allSpeechModes = list(speech.SpeechMode)
 		self.speechModesList: nvdaControls.CustomCheckListBox = settingsSizerHelper.addLabeledControl(
@@ -1791,10 +1866,14 @@ class VoiceSettingsPanel(AutoSettingsMixin, SettingsPanel):
 		config.conf["speech"]["reportNormalizedForCharacterNavigation"] = (
 			self.reportNormalizedForCharacterNavigationCheckBox.IsChecked()
 		)
-		currentIncludeCLDR = config.conf["speech"]["includeCLDR"]
-		config.conf["speech"]["includeCLDR"] = newIncludeCldr = self.includeCLDRCheckbox.IsChecked()
-		if currentIncludeCLDR is not newIncludeCldr:
-			# Either included or excluded CLDR data, so clear the cache.
+		currentSymbolDictionaries = config.conf["speech"]["symbolDictionaries"]
+		config.conf["speech"]["symbolDictionaries"] = newSymbolDictionaries = [
+			d.name
+			for i, d in enumerate(self._availableSymbolDictionaries)
+			if i in self.symbolDictionariesList.CheckedItems
+		]
+		if set(currentSymbolDictionaries) != set(newSymbolDictionaries):
+			# Either included or excluded symbol dictionaries, so clear the cache.
 			characterProcessing.clearSpeechSymbols()
 		delayedDescriptions = self.delayedCharacterDescriptionsCheckBox.IsChecked()
 		config.conf["speech"]["delayedCharacterDescriptions"] = delayedDescriptions
@@ -1979,6 +2058,19 @@ class KeyboardSettingsPanel(SettingsPanel):
 		self.bindHelpEvent("KeyboardSettingsHandleKeys", self.handleInjectedKeysCheckBox)
 		self.handleInjectedKeysCheckBox.SetValue(config.conf["keyboard"]["handleInjectedKeys"])
 
+		minTimeout = int(config.conf.getConfigValidation(("keyboard", "multiPressTimeout")).kwargs["min"])
+		maxTimeout = int(config.conf.getConfigValidation(("keyboard", "multiPressTimeout")).kwargs["max"])
+		# Translators: The label for a control in keyboard settings to modify the timeout for a multiple keypress.
+		multiPressTimeoutText = _("&Multiple key press timeout (ms):")
+		self.multiPressTimeoutEdit = sHelper.addLabeledControl(
+			multiPressTimeoutText,
+			nvdaControls.SelectOnFocusSpinCtrl,
+			min=minTimeout,
+			max=maxTimeout,
+			initial=config.conf["keyboard"]["multiPressTimeout"],
+		)
+		self.bindHelpEvent("MultiPressTimeout", self.multiPressTimeoutEdit)
+
 	def isValid(self) -> bool:
 		# #2871: check whether at least one key is the nvda key.
 		if not self.modifierList.CheckedItems:
@@ -2010,6 +2102,7 @@ class KeyboardSettingsPanel(SettingsPanel):
 		config.conf["keyboard"]["speakCommandKeys"] = self.commandKeysCheckBox.IsChecked()
 		config.conf["keyboard"]["alertForSpellingErrors"] = self.alertForSpellingErrorsCheckBox.IsChecked()
 		config.conf["keyboard"]["handleInjectedKeys"] = self.handleInjectedKeysCheckBox.IsChecked()
+		config.conf["keyboard"]["multiPressTimeout"] = self.multiPressTimeoutEdit.GetValue()
 
 
 class MouseSettingsPanel(SettingsPanel):
@@ -2575,8 +2668,14 @@ class DocumentFormattingPanel(SettingsPanel):
 		# Translators: This is the label for a checkbox in the
 		# document formatting settings panel.
 		fontAttributesText = _("Font attrib&utes")
-		self.fontAttrsCheckBox = fontGroup.addItem(wx.CheckBox(fontGroupBox, label=fontAttributesText))
-		self.fontAttrsCheckBox.SetValue(config.conf["documentFormatting"]["reportFontAttributes"])
+		fontAttributesOptions = [i.displayString for i in OutputMode.__members__.values()]
+		self.fontAttrsList = fontGroup.addLabeledControl(
+			fontAttributesText,
+			wx.Choice,
+			choices=fontAttributesOptions,
+		)
+		self.bindHelpEvent("DocumentFormattingFontAttributes", self.fontAttrsList)
+		self.fontAttrsList.SetSelection(config.conf["documentFormatting"]["fontAttributeReporting"])
 
 		# Translators: This is the label for a checkbox in the
 		# document formatting settings panel.
@@ -2773,7 +2872,14 @@ class DocumentFormattingPanel(SettingsPanel):
 		# Translators: This is the label for a checkbox in the
 		# document formatting settings panel.
 		self.linksCheckBox = elementsGroup.addItem(wx.CheckBox(elementsGroupBox, label=_("Lin&ks")))
+		self.linksCheckBox.Bind(wx.EVT_CHECKBOX, self._onLinksChange)
 		self.linksCheckBox.SetValue(config.conf["documentFormatting"]["reportLinks"])
+
+		# Translators: This is the label for a checkbox in the
+		# document formatting settings panel.
+		self.linkTypeCheckBox = elementsGroup.addItem(wx.CheckBox(elementsGroupBox, label=_("Link type")))
+		self.linkTypeCheckBox.SetValue(config.conf["documentFormatting"]["reportLinkType"])
+		self.linkTypeCheckBox.Enable(self.linksCheckBox.IsChecked())
 
 		# Translators: This is the label for a checkbox in the
 		# document formatting settings panel.
@@ -2841,13 +2947,16 @@ class DocumentFormattingPanel(SettingsPanel):
 	def _onLineIndentationChange(self, evt: wx.CommandEvent) -> None:
 		self.ignoreBlankLinesRLICheckbox.Enable(evt.GetSelection() != 0)
 
+	def _onLinksChange(self, evt: wx.CommandEvent):
+		self.linkTypeCheckBox.Enable(evt.IsChecked())
+
 	def onSave(self):
 		config.conf["documentFormatting"]["detectFormatAfterCursor"] = (
 			self.detectFormatAfterCursorCheckBox.IsChecked()
 		)
 		config.conf["documentFormatting"]["reportFontName"] = self.fontNameCheckBox.IsChecked()
 		config.conf["documentFormatting"]["reportFontSize"] = self.fontSizeCheckBox.IsChecked()
-		config.conf["documentFormatting"]["reportFontAttributes"] = self.fontAttrsCheckBox.IsChecked()
+		config.conf["documentFormatting"]["fontAttributeReporting"] = self.fontAttrsList.GetSelection()
 		config.conf["documentFormatting"]["reportSuperscriptsAndSubscripts"] = (
 			self.superscriptsAndSubscriptsCheckBox.IsChecked()
 		)
@@ -2875,6 +2984,7 @@ class DocumentFormattingPanel(SettingsPanel):
 		config.conf["documentFormatting"]["reportTableCellCoords"] = self.tableCellCoordsCheckBox.IsChecked()
 		config.conf["documentFormatting"]["reportCellBorders"] = self.borderComboBox.GetSelection()
 		config.conf["documentFormatting"]["reportLinks"] = self.linksCheckBox.IsChecked()
+		config.conf["documentFormatting"]["reportLinkType"] = self.linkTypeCheckBox.IsChecked()
 		config.conf["documentFormatting"]["reportGraphics"] = self.graphicsCheckBox.IsChecked()
 		config.conf["documentFormatting"]["reportHeadings"] = self.headingsCheckBox.IsChecked()
 		config.conf["documentFormatting"]["reportLists"] = self.listsCheckBox.IsChecked()
@@ -2931,17 +3041,19 @@ class AudioPanel(SettingsPanel):
 		# Translators: This is the label for the select output device combo in NVDA audio settings.
 		# Examples of an output device are default soundcard, usb headphones, etc.
 		deviceListLabelText = _("Audio output &device:")
-		deviceNames = nvwave.getOutputDeviceNames()
-		# #11349: On Windows 10 20H1 and 20H2, Microsoft Sound Mapper returns an empty string.
-		if deviceNames[0] in ("", "Microsoft Sound Mapper"):
-			# Translators: name for default (Microsoft Sound Mapper) audio output device.
-			deviceNames[0] = _("Microsoft Sound Mapper")
+		# The Windows Core Audio device enumeration does not have the concept of an ID for the default output device, so we have to insert something ourselves instead.
+		# Translators: Value to show when choosing to use the default audio output device.
+		deviceNames = (_("Default output device"), *nvwave.getOutputDeviceNames())
 		self.deviceList = sHelper.addLabeledControl(deviceListLabelText, wx.Choice, choices=deviceNames)
 		self.bindHelpEvent("SelectSynthesizerOutputDevice", self.deviceList)
-		try:
-			selection = deviceNames.index(config.conf["speech"]["outputDevice"])
-		except ValueError:
+		selectedOutputDevice = config.conf["speech"]["outputDevice"]
+		if selectedOutputDevice == "default":
 			selection = 0
+		else:
+			try:
+				selection = deviceNames.index(selectedOutputDevice)
+			except ValueError:
+				selection = 0
 		self.deviceList.SetSelection(selection)
 
 		# Translators: This is a label for the audio ducking combo box in the Audio Settings dialog.
@@ -2990,6 +3102,46 @@ class AudioPanel(SettingsPanel):
 
 		self._appendSoundSplitModesList(sHelper)
 
+		label = _(
+			# Translators: This is a label for the
+			# "allow NVDA to control the volume of other applications"
+			# combo box in settings.
+			"&Allow NVDA to control the volume of other applications:",
+		)
+		self.appVolAdjusterCombo: nvdaControls.FeatureFlagCombo = sHelper.addLabeledControl(
+			labelText=label,
+			wxCtrlClass=nvdaControls.FeatureFlagCombo,
+			keyPath=["audio", "applicationsVolumeMode"],
+			conf=config.conf,
+		)
+		self.appVolAdjusterCombo.Bind(wx.EVT_CHOICE, self._onSoundVolChange)
+		self.bindHelpEvent("AppsVolumeAdjusterStatus", self.appVolAdjusterCombo)
+
+		# Translators: This is the label for a slider control in the
+		# Audio settings panel.
+		label = _("Volume of other applications")
+		self.appSoundVolSlider: nvdaControls.EnhancedInputSlider = sHelper.addLabeledControl(
+			label,
+			nvdaControls.EnhancedInputSlider,
+			minValue=0,
+			maxValue=100,
+		)
+		self.bindHelpEvent("OtherAppVolume", self.appSoundVolSlider)
+		volume = config.conf["audio"]["applicationsSoundVolume"]
+		if 0 <= volume <= 100:
+			self.appSoundVolSlider.SetValue(volume)
+		else:
+			log.error("Invalid volume level: {}", volume)
+			defaultVolume = config.conf.getConfigValidation(["audio", "applicationsSoundVolume"]).default
+			self.appSoundVolSlider.SetValue(defaultVolume)
+
+		self.muteOtherAppsCheckBox: wx.CheckBox = sHelper.addItem(
+			# Translators: Mute other apps checkbox in settings
+			wx.CheckBox(self, label=_("Mute other apps")),
+		)
+		self.muteOtherAppsCheckBox.SetValue(config.conf["audio"]["applicationsSoundMuted"])
+		self.bindHelpEvent("OtherAppMute", self.muteOtherAppsCheckBox)
+
 		self._onSoundVolChange(None)
 
 		audioAwakeTimeLabelText = _(
@@ -3007,7 +3159,6 @@ class AudioPanel(SettingsPanel):
 			initial=config.conf["audio"]["audioAwakeTime"],
 		)
 		self.bindHelpEvent("AudioAwakeTime", self.audioAwakeTimeEdit)
-		self.audioAwakeTimeEdit.Enable(nvwave.usingWasapiWavePlayer())
 
 	def _appendSoundSplitModesList(self, settingsSizerHelper: guiHelper.BoxSizerHelper) -> None:
 		self._allSoundSplitModes = list(audio.SoundSplitState)
@@ -3025,9 +3176,13 @@ class AudioPanel(SettingsPanel):
 		self.soundSplitModesList.Select(0)
 
 	def onSave(self):
-		if config.conf["speech"]["outputDevice"] != self.deviceList.GetStringSelection():
+		# We already use "default" as the key in the config spec, so use it here as an alternative to Microsoft Sound Mapper.
+		selectedOutputDevice = (
+			"default" if self.deviceList.GetSelection() == 0 else self.deviceList.GetStringSelection()
+		)
+		if config.conf["speech"]["outputDevice"] != selectedOutputDevice:
 			# Synthesizer must be reload if output device changes
-			config.conf["speech"]["outputDevice"] = self.deviceList.GetStringSelection()
+			config.conf["speech"]["outputDevice"] = selectedOutputDevice
 			currentSynth = getSynth()
 			if not setSynth(currentSynth.name):
 				_synthWarningDialog(currentSynth.name)
@@ -3043,13 +3198,21 @@ class AudioPanel(SettingsPanel):
 
 		index = self.soundSplitComboBox.GetSelection()
 		config.conf["audio"]["soundSplitState"] = index
-		if nvwave.usingWasapiWavePlayer():
-			audio._setSoundSplitState(audio.SoundSplitState(index))
+		audio._setSoundSplitState(audio.SoundSplitState(index))
 		config.conf["audio"]["includedSoundSplitModes"] = [
 			mIndex
 			for mIndex in range(len(self._allSoundSplitModes))
 			if mIndex in self.soundSplitModesList.CheckedItems
 		]
+		config.conf["audio"]["applicationsSoundVolume"] = self.appSoundVolSlider.GetValue()
+		config.conf["audio"]["applicationsSoundMuted"] = self.muteOtherAppsCheckBox.GetValue()
+		self.appVolAdjusterCombo.saveCurrentValueToConf()
+		audio.appsVolume._updateAppsVolumeImpl(
+			volume=self.appSoundVolSlider.GetValue() / 100.0,
+			muted=self.muteOtherAppsCheckBox.GetValue(),
+			state=self.appVolAdjusterCombo._getControlCurrentFlag(),
+		)
+
 		if audioDucking.isAudioDuckingSupported():
 			index = self.duckingList.GetSelection()
 			config.conf["audio"]["audioDuckingMode"] = index
@@ -3063,13 +3226,11 @@ class AudioPanel(SettingsPanel):
 
 	def _onSoundVolChange(self, event: wx.Event) -> None:
 		"""Called when the sound volume follow checkbox is checked or unchecked."""
-		wasapi = nvwave.usingWasapiWavePlayer()
-		self.soundVolFollowCheckBox.Enable(wasapi)
-		self.soundVolSlider.Enable(
-			wasapi and not self.soundVolFollowCheckBox.IsChecked(),
-		)
-		self.soundSplitComboBox.Enable(wasapi)
-		self.soundSplitModesList.Enable(wasapi)
+		self.soundVolSlider.Enable(not self.soundVolFollowCheckBox.IsChecked())
+
+		avEnabled = config.featureFlagEnums.AppsVolumeAdjusterFlag.ENABLED
+		self.appSoundVolSlider.Enable(self.appVolAdjusterCombo._getControlCurrentValue() == avEnabled)
+		self.muteOtherAppsCheckBox.Enable(self.appVolAdjusterCombo._getControlCurrentValue() == avEnabled)
 
 	def isValid(self) -> bool:
 		enabledSoundSplitModes = self.soundSplitModesList.CheckedItems
@@ -3105,6 +3266,79 @@ class AddonStorePanel(SettingsPanel):
 		self.bindHelpEvent("AutomaticAddonUpdates", self.automaticUpdatesComboBox)
 		index = [x.value for x in AddonsAutomaticUpdate].index(config.conf["addonStore"]["automaticUpdates"])
 		self.automaticUpdatesComboBox.SetSelection(index)
+
+		# Translators: The label for the mirror server on the Add-on Store Settings panel.
+		mirrorBoxSizer = wx.StaticBoxSizer(wx.HORIZONTAL, self, label=_("Mirror server"))
+		mirrorBox = mirrorBoxSizer.GetStaticBox()
+		mirrorBoxSizerHelper = guiHelper.BoxSizerHelper(self, sizer=mirrorBoxSizer)
+		sHelper.addItem(mirrorBoxSizerHelper)
+
+		# Use an ExpandoTextCtrl because even when read-only it accepts focus from keyboard, which
+		# standard read-only TextCtrl does not. ExpandoTextCtrl is a TE_MULTILINE control, however
+		# by default it renders as a single line. Standard TextCtrl with TE_MULTILINE has two lines,
+		# and a vertical scroll bar. This is not neccessary for the single line of text we wish to
+		# display here.
+		# Note: To avoid code duplication, the value of this text box will be set in `onPanelActivated`.
+		self.mirrorURLTextBox = ExpandoTextCtrl(
+			mirrorBox,
+			size=(self.scaleSize(250), -1),
+			style=wx.TE_READONLY,
+		)
+		# Translators: This is the label for the button used to change the Add-on Store mirror URL,
+		# it appears in the context of the mirror server group on the Add-on Store page of NVDA's settings.
+		changeMirrorBtn = wx.Button(mirrorBox, label=_("Change..."))
+		mirrorBoxSizerHelper.addItem(
+			guiHelper.associateElements(
+				self.mirrorURLTextBox,
+				changeMirrorBtn,
+			),
+		)
+		self.bindHelpEvent("AddonStoreMetadataMirror", mirrorBox)
+		self.mirrorURLTextBox.Bind(wx.EVT_CHAR_HOOK, self._enterTriggersOnChangeMirrorURL)
+		changeMirrorBtn.Bind(wx.EVT_BUTTON, self.onChangeMirrorURL)
+
+	def onChangeMirrorURL(self, evt: wx.CommandEvent | wx.KeyEvent):
+		"""Show the dialog to change the Add-on Store mirror URL, and refresh the dialog in response to the URL being changed."""
+		# Import late to avoid circular dependency.
+		from gui._SetURLDialog import _SetURLDialog
+
+		changeMirror = _SetURLDialog(
+			self,
+			# Translators: Title of the dialog used to change the Add-on Store mirror URL.
+			title=_("Set Add-on Store Mirror Server"),
+			configPath=("addonStore", "baseServerURL"),
+			helpId="SetURLDialog",
+			urlTransformer=lambda url: f"{url}/cacheHash.json",
+			responseValidator=_isResponseAddonStoreCacheHash,
+		)
+		ret = changeMirror.ShowModal()
+		if ret == wx.ID_OK:
+			self.Freeze()
+			# trigger a refresh of the settings
+			self.onPanelActivated()
+			self._sendLayoutUpdatedEvent()
+			self.Thaw()
+
+	def _enterTriggersOnChangeMirrorURL(self, evt: wx.KeyEvent):
+		"""Open the change update mirror URL dialog in response to the enter key in the mirror URL read-only text box."""
+		if evt.KeyCode == wx.WXK_RETURN:
+			self.onChangeMirrorURL(evt)
+		else:
+			evt.Skip()
+
+	def _updateCurrentMirrorURL(self):
+		self.mirrorURLTextBox.SetValue(
+			(
+				url
+				if (url := config.conf["addonStore"]["baseServerURL"])
+				# Translators: A value that appears in NVDA's Settings to indicate that no mirror is in use.
+				else _("No mirror")
+			),
+		)
+
+	def onPanelActivated(self):
+		self._updateCurrentMirrorURL()
+		super().onPanelActivated()
 
 	def onSave(self):
 		index = self.automaticUpdatesComboBox.GetSelection()
@@ -3592,27 +3826,6 @@ class AdvancedPanelControls(
 
 		# Translators: This is the label for a group of advanced options in the
 		# Advanced settings panel
-		label = _("Audio")
-		audio = wx.StaticBoxSizer(wx.VERTICAL, self, label=label)
-		audioBox = audio.GetStaticBox()  # noqa: F841
-		audioGroup = guiHelper.BoxSizerHelper(self, sizer=audio)
-		sHelper.addItem(audioGroup)
-
-		# Translators: This is the label for a checkbox control in the Advanced settings panel.
-		label = _("Use WASAPI for audio output (requires restart)")
-		self.wasapiComboBox = cast(
-			nvdaControls.FeatureFlagCombo,
-			audioGroup.addLabeledControl(
-				labelText=label,
-				wxCtrlClass=nvdaControls.FeatureFlagCombo,
-				keyPath=["audio", "WASAPI"],
-				conf=config.conf,
-			),
-		)
-		self.bindHelpEvent("WASAPI", self.wasapiComboBox)
-
-		# Translators: This is the label for a group of advanced options in the
-		# Advanced settings panel
 		label = _("Debug logging")
 		debugLogSizer = wx.StaticBoxSizer(wx.VERTICAL, self, label=label)
 		debugLogGroup = guiHelper.BoxSizerHelper(self, sizer=debugLogSizer)
@@ -3797,7 +4010,6 @@ class AdvancedPanelControls(
 		config.conf["documentFormatting"]["reportTransparentColor"] = (
 			self.reportTransparentColorCheckBox.IsChecked()
 		)
-		self.wasapiComboBox.saveCurrentValueToConf()
 		config.conf["annotations"]["reportDetails"] = self.annotationsDetailsCheckBox.IsChecked()
 		config.conf["annotations"]["reportAriaDescription"] = self.ariaDescCheckBox.IsChecked()
 		self.brailleLiveRegionsCombo.saveCurrentValueToConf()
@@ -4141,11 +4353,20 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 		outputsLabelText = _("&Output table:")
 		self.outTables = [table for table in tables if table.output]
 		self.outTableNames = [table.fileName for table in self.outTables]
-		outTableChoices = [table.displayName for table in self.outTables]
+		outTableForCurLangIndex = self.outTableNames.index(
+			brailleTables.getDefaultTableForCurLang(brailleTables.TableType.OUTPUT),
+		)
+		self.outTableForCurLang = self.outTables[outTableForCurLangIndex]
+		# Translators: An option in Braille settings to select a braille table automatically, according to the current language.
+		outTableChoices = [_("Automatic ({name})").format(name=self.outTableForCurLang.displayName)]
+		outTableChoices.extend([table.displayName for table in self.outTables])
 		self.outTableList = sHelper.addLabeledControl(outputsLabelText, wx.Choice, choices=outTableChoices)
 		self.bindHelpEvent("BrailleSettingsOutputTable", self.outTableList)
 		try:
-			selection = self.outTables.index(braille.handler.table)
+			if config.conf["braille"]["translationTable"] == "auto":
+				selection = 0
+			else:
+				selection = self.outTables.index(braille.handler.table) + 1
 			self.outTableList.SetSelection(selection)
 		except:  # noqa: E722
 			log.exception()
@@ -4158,11 +4379,21 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 		# Translators: The label for a setting in braille settings to select the input table (the braille table used to type braille characters on a braille keyboard).
 		inputLabelText = _("&Input table:")
 		self.inTables = [table for table in tables if table.input]
-		inTableChoices = [table.displayName for table in self.inTables]
+		self.inTableNames = [table.fileName for table in self.inTables]
+		inTableForCurLangIndex = self.inTableNames.index(
+			brailleTables.getDefaultTableForCurLang(brailleTables.TableType.INPUT),
+		)
+		self.inTableForCurLang = self.inTables[inTableForCurLangIndex]
+		# Translators: An option in Braille settings to select a braille table automatically, according to the current language.
+		inTableChoices = [_("Automatic ({name})").format(name=self.inTableForCurLang.displayName)]
+		inTableChoices.extend([table.displayName for table in self.inTables])
 		self.inTableList = sHelper.addLabeledControl(inputLabelText, wx.Choice, choices=inTableChoices)
 		self.bindHelpEvent("BrailleSettingsInputTable", self.inTableList)
 		try:
-			selection = self.inTables.index(brailleInput.handler.table)
+			if config.conf["braille"]["inputTable"] == "auto":
+				selection = 0
+			else:
+				selection = self.inTables.index(brailleInput.handler.table) + 1
 			self.inTableList.SetSelection(selection)
 		except:  # noqa: E722
 			log.exception()
@@ -4361,7 +4592,23 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 			wx.CheckBox(self.followCursorGroupBox, label=readByParagraphText),
 		)
 		self.bindHelpEvent("BrailleSettingsReadByParagraph", self.readByParagraphCheckBox)
+		self.readByParagraphCheckBox.Bind(wx.EVT_CHECKBOX, self.onReadByParagraphChange)
 		self.readByParagraphCheckBox.Value = config.conf["braille"]["readByParagraph"]
+
+		# Translators: This is a label for a combo-box in the Braille settings panel to select paragraph start markers.
+		labelText = _("Paragraph start marker:")
+		self.paragraphStartMarkersComboBox = followCursorGroupHelper.addLabeledControl(
+			labelText,
+			wx.Choice,
+			choices=[marker.displayString for marker in ParagraphStartMarker],
+		)
+		self.bindHelpEvent("BrailleParagraphStartMarkers", self.paragraphStartMarkersComboBox)
+		paragraphStartMarker = config.conf["braille"]["paragraphStartMarker"]
+		self.paragraphStartMarkersComboBox.SetSelection(
+			[marker.value for marker in ParagraphStartMarker].index(paragraphStartMarker),
+		)
+		if not self.readByParagraphCheckBox.GetValue():
+			self.paragraphStartMarkersComboBox.Disable()
 
 		# Translators: The label for a setting in braille settings to select how the context for the focus object should be presented on a braille display.
 		focusContextPresentationLabelText = _("Focus context presentation:")
@@ -4393,6 +4640,34 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 			)
 		)
 		self.bindHelpEvent("BrailleSettingsShowSelection", self.brailleShowSelectionCombo)
+
+		self.formattingDisplayCombo: nvdaControls.FeatureFlagCombo = (
+			followCursorGroupHelper.addLabeledControl(
+				# Translators: This is a label for a combo-box in the Braille settings panel.
+				labelText=_("Formatting &display"),
+				wxCtrlClass=nvdaControls.FeatureFlagCombo,
+				keyPath=("braille", "fontFormattingDisplay"),
+				conf=config.conf,
+			)
+		)
+		self.bindHelpEvent("BrailleFormattingDisplay", self.formattingDisplayCombo)
+
+		# Translators: The label for a setting in braille settings to speak the character under the cursor when cursor routing in text.
+		speakOnRoutingText = _("Spea&k character when routing cursor in text")
+		self.speakOnRoutingCheckBox = followCursorGroupHelper.addItem(
+			wx.CheckBox(self.followCursorGroupBox, label=speakOnRoutingText),
+		)
+		self.bindHelpEvent("BrailleSpeakOnRouting", self.speakOnRoutingCheckBox)
+		self.speakOnRoutingCheckBox.Value = config.conf["braille"]["speakOnRouting"]
+
+		# Translators: The label for a setting in braille settings to speak the current line or paragraph when navigating by them with braille.
+		speakOnNavigatingText = _("Speak when navigating by &line or paragraph")
+		self.speakOnNavigatingCheckBox = followCursorGroupHelper.addItem(
+			wx.CheckBox(self.followCursorGroupBox, label=speakOnNavigatingText),
+		)
+		self.bindHelpEvent("BrailleSpeakOnNavigating", self.speakOnNavigatingCheckBox)
+		self.speakOnNavigatingCheckBox.Value = config.conf["braille"]["speakOnNavigatingByUnit"]
+
 		self.followCursorGroupBox.Enable(
 			list(braille.BrailleMode)[self.brailleModes.GetSelection()] is braille.BrailleMode.FOLLOW_CURSORS,
 		)
@@ -4431,13 +4706,19 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 
 	def onSave(self):
 		AutoSettingsMixin.onSave(self)
-
-		braille.handler.table = self.outTables[self.outTableList.GetSelection()]
-		brailleInput.handler.table = self.inTables[self.inTableList.GetSelection()]
+		if self.outTableList.GetSelection() > 0:
+			braille.handler.table = self.outTables[self.outTableList.GetSelection() - 1]
+		else:
+			braille.handler.table = self.outTableForCurLang
+			config.conf["braille"]["translationTable"] = "auto"
+		if self.inTableList.GetSelection():
+			brailleInput.handler.table = self.inTables[self.inTableList.GetSelection() - 1]
+		else:
+			brailleInput.handler.table = self.inTableForCurLang
+			config.conf["braille"]["inputTable"] = "auto"
 		mode = list(braille.BrailleMode)[self.brailleModes.GetSelection()]
 		config.conf["braille"]["mode"] = mode.value
 		braille.handler.mainBuffer.clear()
-		config.conf["braille"]["translationTable"] = self.outTableNames[self.outTableList.GetSelection()]
 		config.conf["braille"]["expandAtCursor"] = self.expandAtCursorCheckBox.GetValue()
 		config.conf["braille"]["showCursor"] = self.showCursorCheckBox.GetValue()
 		config.conf["braille"]["cursorBlink"] = self.cursorBlinkCheckBox.GetValue()
@@ -4457,6 +4738,11 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 			braille.handler.setTether(tetherChoice, auto=False)
 		self.brailleReviewRoutingMovesSystemCaretCombo.saveCurrentValueToConf()
 		config.conf["braille"]["readByParagraph"] = self.readByParagraphCheckBox.Value
+		config.conf["braille"]["paragraphStartMarker"] = [marker.value for marker in ParagraphStartMarker][
+			self.paragraphStartMarkersComboBox.GetSelection()
+		]
+		config.conf["braille"]["speakOnRouting"] = self.speakOnRoutingCheckBox.Value
+		config.conf["braille"]["speakOnNavigatingByUnit"] = self.speakOnNavigatingCheckBox.Value
 		config.conf["braille"]["wordWrap"] = self.wordWrapCheckBox.Value
 		self.unicodeNormalizationCombo.saveCurrentValueToConf()
 		config.conf["braille"]["focusContextPresentation"] = self.focusContextPresentationValues[
@@ -4464,6 +4750,7 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 		]
 		self.brailleInterruptSpeechCombo.saveCurrentValueToConf()
 		self.brailleShowSelectionCombo.saveCurrentValueToConf()
+		self.formattingDisplayCombo.saveCurrentValueToConf()
 
 	def onShowCursorChange(self, evt):
 		self.cursorBlinkCheckBox.Enable(evt.IsChecked())
@@ -4481,6 +4768,9 @@ class BrailleSettingsSubPanel(AutoSettingsMixin, SettingsPanel):
 		"""Shows or hides "Move system caret when routing review cursor" braille setting."""
 		tetherChoice = [x.value for x in TetherTo][evt.GetSelection()]
 		self.brailleReviewRoutingMovesSystemCaretCombo.Enable(tetherChoice != TetherTo.FOCUS.value)
+
+	def onReadByParagraphChange(self, evt: wx.CommandEvent):
+		self.paragraphStartMarkersComboBox.Enable(evt.IsChecked())
 
 	def _onModeChange(self, evt: wx.CommandEvent):
 		self.followCursorGroupBox.Enable(not evt.GetSelection())
@@ -5292,3 +5582,15 @@ class SpeechSymbolsDialog(SettingsDialog):
 		self.filter(self.filterEdit.Value)
 		self._refreshVisibleItems()
 		evt.Skip()
+
+
+def _isResponseAddonStoreCacheHash(response: requests.Response) -> bool:
+	try:
+		# Attempt to parse the response as JSON
+		data = response.json()
+	except ValueError:
+		# Add-on Store cache hash is JSON, so this can't be it.
+		return False
+	# While the NV Access Add-on Store cache hash is a git commit hash as a string, other implementations may use a different format.
+	# Therefore, we only check if the data is a non-empty string.
+	return isinstance(data, str) and bool(data)

@@ -5,6 +5,8 @@
 # Bill Dengler, Joseph Lee, Takuya Nishimoto
 
 import os
+import subprocess
+import sys
 
 import winUser
 import wx
@@ -72,7 +74,7 @@ def doInstall(
 			handleAlreadyElevated=True,
 		)
 		if res == 2:
-			raise installer.RetriableFailure  # noqa: E701
+			raise installer.RetriableFailure
 		if copyPortableConfig:
 			installedUserConfigPath = config.getInstalledUserConfigPath()
 			if installedUserConfigPath:
@@ -131,9 +133,29 @@ def doInstall(
 	if startAfterInstall:
 		newNVDA = core.NewNVDAInstance(
 			filePath=os.path.join(installer.defaultInstallPath, "nvda.exe"),
+			parameters=_generate_executionParameters(),
 		)
 	if not core.triggerNVDAExit(newNVDA):
 		log.error("NVDA already in process of exiting, this indicates a logic error.")
+
+
+def _generate_executionParameters() -> str:
+	executeParams: list[str] = []
+	if globalVars.appArgs.disableAddons:
+		executeParams.append("--disable-addons")
+	# pass the config path to the new instance, so that if a custom config path is in use, it will be
+	# inherited. We can't rely on WritePaths.configDir or appArgs.configPath here, as they could be set to
+	# the default path, which may be a temporary directory, so we must sniff sys.argv.
+	# Read sys.argv backwards, since the last instance of a CLI option takes effect.
+	# We start from len-2 as the -c option must have a value, so it is guaranteed to take up 2 items in argv.
+	for i in range(len(sys.argv) - 2, 0, -1):
+		if sys.argv[i] in ("-c", "--config-path"):
+			# We don't absolutise -c here because if it was provided by a previous copy of NVDA this will
+			# have already been done, and if it was provided by the user absolutising it now will result in
+			# it being in a temporary directory, which is almost certainly not what they want.
+			executeParams.extend(("--config-path", sys.argv[i + 1]))
+			break
+	return subprocess.list2cmdline(executeParams)
 
 
 def doSilentInstall(
@@ -329,7 +351,7 @@ class InstallingOverNewerVersionDialog(
 		contentSizer.addItem(text)
 
 		buttonHelper = guiHelper.ButtonHelper(orientation=wx.HORIZONTAL)
-		okButton = buttonHelper.addButton(  # noqa: F841
+		buttonHelper.addButton(
 			parent=self,
 			id=wx.ID_OK,
 			# Translators: The label of a button to proceed with installation,
@@ -364,46 +386,48 @@ def showInstallGui():
 	gui.mainFrame.postPopup()
 
 
+def _nvdaExistsInDir(directory: str) -> bool:
+	return os.path.exists(os.path.join(directory, "nvda.exe"))
+
+
 def _warnAndConfirmForNonEmptyDirectory(portableDirectory: str) -> bool:
 	"""
 	Display a warning message if the specified directory is not empty.
 	:param portableDirectory: The directory to check.
 	:return: True if the user wants to continue, False if the user wants to cancel.
 	"""
-	if os.path.exists(portableDirectory):
-		dirContents = os.listdir(portableDirectory)
-	else:
-		dirContents = []
-	if len(dirContents) > 0:
-		if "nvda.exe" in dirContents:
-			if wx.NO == gui.messageBox(
-				_(
-					# Translators: The message displayed when the user has specified a destination directory
-					# that already has a portable copy in the Create Portable NVDA dialog.
-					f"A portable copy already exists in the directory '{portableDirectory}'. "
-					"Do you want to update it?",
-				),
-				# Translators: The title of a dialog presented when the user has specified a destination directory
-				# that already has a portable copy in the Create Portable NVDA dialog.
-				_("Portable Copy Exists"),
-				wx.YES_NO | wx.ICON_QUESTION,
-			):
-				return False
-		elif wx.NO == gui.messageBox(
+	if not os.path.exists(portableDirectory):
+		# The directory does not exist, so we can proceed.
+		return True
+	if not any(os.scandir(portableDirectory)):
+		# The directory is empty, so we can proceed.
+		return True
+	if _nvdaExistsInDir(portableDirectory):
+		return wx.YES == gui.messageBox(
 			_(
 				# Translators: The message displayed when the user has specified a destination directory
-				# that already exists in the Create Portable NVDA dialog.
-				f"The specified directory '{portableDirectory}' is not empty. "
-				"Proceeding will delete and replace existing files in the directory. "
-				"Do you want to overwrite the contents of this folder? ",
-			),
+				# that already has a portable copy in the Create Portable NVDA dialog.
+				"A portable copy already exists in the directory '{portableDirectory}'. "
+				"Do you want to update it?",
+			).format(portableDirectory=portableDirectory),
 			# Translators: The title of a dialog presented when the user has specified a destination directory
-			# that already exists in the Create Portable NVDA dialog.
-			_("Directory Exists"),
+			# that already has a portable copy in the Create Portable NVDA dialog.
+			_("Portable Copy Exists"),
 			wx.YES_NO | wx.ICON_QUESTION,
-		):
-			return False
-	return True
+		)
+	return wx.YES == gui.messageBox(
+		_(
+			# Translators: The message displayed when the user has specified a destination directory
+			# that already exists in the Create Portable NVDA dialog.
+			"The specified directory '{portableDirectory}' is not empty. "
+			"Proceeding will delete and replace existing files in the directory. "
+			"Do you want to overwrite the contents of this folder? ",
+		).format(portableDirectory=portableDirectory),
+		# Translators: The title of a dialog presented when the user has specified a destination directory
+		# that already exists in the Create Portable NVDA dialog.
+		_("Directory Exists"),
+		wx.YES_NO | wx.ICON_QUESTION,
+	)
 
 
 def _getUniqueNewPortableDirectory(basePath: str) -> str:
@@ -598,6 +622,7 @@ def doCreatePortable(
 		if startAfterCreate:
 			newNVDA = core.NewNVDAInstance(
 				filePath=os.path.join(portableDirectory, "nvda.exe"),
+				parameters=_generate_executionParameters(),
 			)
 		if not core.triggerNVDAExit(newNVDA):
 			log.error("NVDA already in process of exiting, this indicates a logic error.")

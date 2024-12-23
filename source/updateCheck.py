@@ -33,6 +33,7 @@ if not versionInfo.updateVersionType:
 import gui.contextHelp  # noqa: E402
 from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit  # noqa: E402
 import sys  # noqa: E402
+import subprocess
 import os
 import inspect
 import threading
@@ -60,13 +61,14 @@ from addonStore.models.version import (  # noqa: E402
 	getAddonCompatibilityMessage,
 	getAddonCompatibilityConfirmationMessage,
 )
+import addonAPIVersion
 from logHandler import log, isPathExternalToNVDA
 import config
 import winKernel
 from utils.tempFile import _createEmptyTempFileForDeletingFile
 
 #: The URL to use for update checks.
-CHECK_URL = "https://www.nvaccess.org/nvdaUpdateCheck"
+_DEFAULT_CHECK_URL = "https://www.nvaccess.org/nvdaUpdateCheck"
 #: The time to wait between checks.
 CHECK_INTERVAL = 86400  # 1 day
 #: The time to wait before retrying a failed check.
@@ -88,6 +90,12 @@ state: Optional[Dict[str, Any]] = None
 #: The single instance of L{AutoUpdateChecker} if automatic update checking is enabled,
 #: C{None} if it is disabled.
 autoChecker: Optional["AutoUpdateChecker"] = None
+
+
+def _getCheckURL() -> str:
+	if url := config.conf["update"]["serverURL"]:
+		return url
+	return _DEFAULT_CHECK_URL
 
 
 def getQualifiedDriverClassNameForStats(cls):
@@ -161,7 +169,7 @@ def checkForUpdate(auto: bool = False) -> Optional[Dict]:
 			"outputBrailleTable": config.conf["braille"]["translationTable"] if brailleDisplayClass else None,
 		}
 		params.update(extraParams)
-	url = "%s?%s" % (CHECK_URL, urllib.parse.urlencode(params))
+	url = f"{_getCheckURL()}?{urllib.parse.urlencode(params)}"
 	try:
 		log.debug(f"Fetching update data from {url}")
 		res = urllib.request.urlopen(url, timeout=UPDATE_FETCH_TIMEOUT_S)
@@ -237,28 +245,47 @@ def executePendingUpdate():
 		_executeUpdate(updateTuple[0])
 
 
-def _executeUpdate(destPath):
+def _executeUpdate(destPath: str) -> None:
+	"""Execute the update process.
+
+	:param destPath: The path to the update executable.
+	"""
 	if not destPath:
+		log.error("destPath must be a non-empty string.", exc_info=True)
 		return
 
 	_setStateToNone(state)
 	saveState()
+	if not core.triggerNVDAExit(core.NewNVDAInstance(destPath, _generate_updateParameters())):
+		log.error("NVDA already in process of exiting, this indicates a logic error.")
+
+
+def _generate_updateParameters() -> str:
+	"""Generate parameters to pass to the new NVDA instance for the update process.
+
+	We generate parameters that specify:
+	- Whether to install, update a portable copy, or run the launcher.
+	- Whether to disable addons.
+	- The path to the configuration directory.
+
+	:return: The parameters to pass to the new NVDA instance.
+	"""
+	executeParams: list[str] = []
 	if config.isInstalledCopy():
-		executeParams = "--install -m"
+		executeParams.extend(("--install", "-m"))
 	else:
 		portablePath = globalVars.appDir
 		if os.access(portablePath, os.W_OK):
-			executeParams = (
-				'--create-portable --portable-path "{portablePath}" --config-path "{configPath}" -m'.format(
-					portablePath=portablePath,
-					configPath=WritePaths.configDir,
-				)
-			)
+			executeParams.extend(("--create-portable", "-m", "--portable-path", portablePath))
 		else:
-			executeParams = "--launcher"
-	# #4475: ensure that the new process shows its first window, by providing SW_SHOWNORMAL
-	if not core.triggerNVDAExit(core.NewNVDAInstance(destPath, executeParams)):
-		log.error("NVDA already in process of exiting, this indicates a logic error.")
+			# We can't write to the currently running portable copy's directory, so just run the launcher.
+			executeParams.append("--launcher")
+	if globalVars.appArgs.disableAddons:
+		executeParams.append("--disable-addons")
+	# pass the config path to the new instance, so that if a custom config path is in use, it will be inherited.
+	# If the default con fig path is in use, the new instance would use it anyway, so there is no harm in passing it.
+	executeParams.extend(("--config-path", WritePaths.configDir))
+	return subprocess.list2cmdline(executeParams)
 
 
 class UpdateChecker(garbageHandler.TrackedObject):
@@ -311,12 +338,31 @@ class UpdateChecker(garbageHandler.TrackedObject):
 		)
 
 	def _error(self):
+		if url := config.conf["update"]["serverURL"]:
+			tip = pgettext(
+				"updateCheck",
+				# Translators: A suggestion of what to do when checking for NVDA updates fails and an update mirror is being used.
+				# {url} will be replaced with the mirror URL.
+				"Make sure you are connected to the internet, and the NVDA update mirror URL is valid.\n"
+				"Mirror URL: {url}",
+			).format(url=url)
+		else:
+			tip = pgettext(
+				"updateCheck",
+				# Translators: A suggestion of what to do when fetching add-on data from the store fails and the default metadata URL is being used.
+				"Make sure you are connected to the internet and try again.",
+			)
+		message = pgettext(
+			"updateCheck",
+			# Translators: A message indicating that an error occurred while checking for an update to NVDA.
+			# tip will be replaced with a context sensitive suggestion of next steps.
+			"Error checking for update.\n{tip}",
+		).format(tip=tip)
 		wx.CallAfter(self._progressDialog.done)
 		self._progressDialog = None
 		wx.CallAfter(
 			gui.messageBox,
-			# Translators: A message indicating that an error occurred while checking for an update to NVDA.
-			_("Error checking for update."),
+			message,
 			# Translators: The title of an error message dialog.
 			_("Error"),
 			wx.OK | wx.ICON_ERROR,
@@ -407,7 +453,7 @@ class UpdateResultDialog(
 
 			self.apiVersion = pendingUpdateDetails[2]
 			self.backCompatTo = pendingUpdateDetails[3]
-			showAddonCompat = any(
+			showAddonCompat = (self.backCompatTo[0] > addonAPIVersion.BACK_COMPAT_TO[0]) and any(
 				getIncompatibleAddons(
 					currentAPIVersion=self.apiVersion,
 					backCompatToAPIVersion=self.backCompatTo,
@@ -525,7 +571,7 @@ class UpdateAskInstallDialog(
 		# Translators: A message indicating that an update to NVDA is ready to be applied.
 		message = _("Update to NVDA version {version} is ready to be applied.\n").format(version=version)
 
-		showAddonCompat = any(
+		showAddonCompat = (self.backCompatTo[0] > addonAPIVersion.BACK_COMPAT_TO[0]) and any(
 			getIncompatibleAddons(
 				currentAPIVersion=self.apiVersion,
 				backCompatToAPIVersion=self.backCompatTo,
@@ -923,7 +969,7 @@ def _updateWindowsRootCertificates():
 	with requests.get(
 		# We must specify versionType so the server doesn't return a 404 error and
 		# thus cause an exception.
-		CHECK_URL + "?versionType=stable",
+		f"{_getCheckURL()}?versionType=stable",
 		timeout=UPDATE_FETCH_TIMEOUT_S,
 		# Use an unverified connection to avoid a certificate error.
 		verify=False,

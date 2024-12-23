@@ -43,6 +43,7 @@ from config.configFlags import (
 	TetherTo,
 	ShowMessages,
 	BrailleMode,
+	OutputMode,
 )
 from config.featureFlag import FeatureFlag
 from config.featureFlagEnums import BoolFlag
@@ -67,6 +68,7 @@ from base64 import b16encode
 import vision
 from utils.security import objectBelowLockScreenAndWindowsIsLocked
 import audio
+from audio import appsVolume
 
 
 #: Script category for text review commands.
@@ -121,6 +123,31 @@ SCRCAT_AUDIO = _("Audio")
 # Translators: Reported when there are no settings to configure in synth settings ring
 # (example: when there is no setting for language).
 NO_SETTINGS_MSG = _("No settings")
+# Translators: Reported when there is no selection
+NO_SELECTION_MESSAGE = _("No selection")
+
+
+def toggleBooleanValue(
+	configSection: str,
+	configKey: str,
+	enabledMsg: str,
+	disabledMsg: str,
+) -> None:
+	"""
+	Toggles a boolean value in the configuration and returns the appropriate message.
+
+	:param configSection: The configuration section containing the boolean key.
+	:param configKey: The configuration key associated with the boolean value.
+	:param enabledMsg: The message for the enabled state.
+	:param disabledMsg: The message for the disabled state.
+	:return: None.
+	"""
+	currentValue = config.conf[configSection][configKey]
+	newValue = not currentValue
+	config.conf[configSection][configKey] = newValue
+
+	msg = enabledMsg if newValue else disabledMsg
+	ui.message(msg)
 
 
 class GlobalCommands(ScriptableObject):
@@ -161,7 +188,9 @@ class GlobalCommands(ScriptableObject):
 	def script_toggleInputHelp(self, gesture):
 		inputCore.manager.isInputHelpActive = not inputCore.manager.isInputHelpActive
 		# Translators: This will be presented when the input help is toggled.
-		stateOn = _("input help on")
+		stateOn = _("input help on. Press {gestureKeys} again to turn it off.").format(
+			gestureKeys=gesture.displayName,
+		)
 		# Translators: This will be presented when the input help is toggled.
 		stateOff = _("input help off")
 		state = stateOn if inputCore.manager.isInputHelpActive else stateOff
@@ -339,9 +368,8 @@ class GlobalCommands(ScriptableObject):
 			if scriptCount == 0:
 				speech.speakTextSelected(info.text)
 				braille.handler.message(selectMessage)
-
 			elif scriptCount == 3:
-				ui.browseableMessage(info.text)
+				ui.browseableMessage(info.text, copyButton=True, closeButton=True)
 				return
 
 			elif len(info.text) < speech.speech.MAX_LENGTH_FOR_SELECTION_REPORTING:
@@ -349,6 +377,24 @@ class GlobalCommands(ScriptableObject):
 			else:
 				speech.speakTextSelected(info.text)
 				braille.handler.message(selectMessage)
+
+	@staticmethod
+	def _getSelection() -> textInfos.TextInfo | None:
+		"""Gets the current selection, if any.
+		:return: The TextInfo corresponding to the current selection, or None if no selection is available.
+		"""
+		obj = api.getFocusObject()
+		treeInterceptor = obj.treeInterceptor
+		if (
+			isinstance(treeInterceptor, treeInterceptorHandler.DocumentTreeInterceptor)
+			and not treeInterceptor.passThrough
+		):
+			obj = treeInterceptor
+		try:
+			info = obj.makeTextInfo(textInfos.POSITION_SELECTION)
+			return info.copy()
+		except (RuntimeError, NotImplementedError):
+			return None
 
 	@script(
 		description=_(
@@ -525,7 +571,7 @@ class GlobalCommands(ScriptableObject):
 
 	@script(
 		# Translators: Input help mode message for toggle speak command keys command.
-		description=_("Toggles on and off the speaking of typed keys, that are not specifically characters"),
+		description=_("Toggles on and off the speaking of command keys"),
 		category=SCRCAT_SPEECH,
 		gesture="kb:NVDA+4",
 	)
@@ -573,20 +619,30 @@ class GlobalCommands(ScriptableObject):
 		ui.message(state)
 
 	@script(
-		# Translators: Input help mode message for toggle report font attributes command.
-		description=_("Toggles on and off the reporting of font attributes"),
+		description=_(
+			# Translators: Input help mode message for toggle report font attributes command.
+			"Cycles font attribute reporting between speech, braille, speech and braille, and off.",
+		),
 		category=SCRCAT_DOCUMENTFORMATTING,
 	)
-	def script_toggleReportFontAttributes(self, gesture):
-		if config.conf["documentFormatting"]["reportFontAttributes"]:
-			# Translators: The message announced when toggling the report font attributes document formatting setting.
-			state = _("report font attributes off")
-			config.conf["documentFormatting"]["reportFontAttributes"] = False
-		else:
-			# Translators: The message announced when toggling the report font attributes document formatting setting.
-			state = _("report font attributes on")
-			config.conf["documentFormatting"]["reportFontAttributes"] = True
-		ui.message(state)
+	def script_toggleReportFontAttributes(self, gesture: "inputCore.InputGesture"):
+		currentValue = config.conf["documentFormatting"]["fontAttributeReporting"]
+		nextValue = OutputMode((currentValue + 1) % len(OutputMode.__members__))
+		match nextValue:
+			case OutputMode.OFF:
+				# Translators: A state in which font attributes are not reported.
+				status = _("Do not report font attributes")
+			case OutputMode.SPEECH:
+				# Translators: A state in which font attributes are only spoken.
+				status = _("Speak font attributes")
+			case OutputMode.BRAILLE:
+				# Translators: A state in which font attributes are only brailled.
+				status = _("Braille font attributes")
+			case OutputMode.SPEECH_AND_BRAILLE:
+				# Translators: A state in which font attributes are both spoken and brailled.
+				status = _("Speak and braille font attributes")
+		config.conf["documentFormatting"]["fontAttributeReporting"] = nextValue
+		ui.message(status)
 
 	@script(
 		# Translators: Input help mode message for toggle superscripts and subscripts command.
@@ -890,6 +946,26 @@ class GlobalCommands(ScriptableObject):
 			state = _("report links on")
 			config.conf["documentFormatting"]["reportLinks"] = True
 		ui.message(state)
+
+	@script(
+		# Translators: Input help mode message for toggle report link type command.
+		description=_("Toggles on and off the reporting of link type"),
+		category=SCRCAT_DOCUMENTFORMATTING,
+	)
+	def script_toggleReportLinkType(self, gesture: inputCore.InputGesture):
+		if config.conf["documentFormatting"]["reportLinks"]:
+			toggleBooleanValue(
+				configSection="documentFormatting",
+				configKey="reportLinkType",
+				# Translators: The message announced when toggling the report link type document formatting setting.
+				enabledMsg=_("Report link type on"),
+				# Translators: The message announced when toggling the report link type document formatting setting.
+				disabledMsg=_("Report link type off"),
+			)
+		else:
+			# Translators: The message announced when reporting links is disabled,
+			# and the user tries to toggle the report link type document formatting setting.
+			ui.message(_("The report links setting must be enabled to toggle report link type"))
 
 	@script(
 		# Translators: Input help mode message for toggle report graphics command.
@@ -2161,6 +2237,63 @@ class GlobalCommands(ScriptableObject):
 			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
 			return
 
+	@script(
+		description=_(
+			# Translators: Input help mode message for move review cursor to start of selection command.
+			"Moves the review cursor to the first character of the selection, and speaks it",
+		),
+		category=SCRCAT_TEXTREVIEW,
+		gesture="kb:NVDA+alt+home",
+	)
+	def script_review_startOfSelection(self, gesture: inputCore.InputGesture):
+		info = self._getSelection()
+		if info is None or info.isCollapsed:
+			ui.message(NO_SELECTION_MESSAGE)
+			return
+		info.collapse()
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET,
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+
+	@script(
+		description=_(
+			# Translators: Input help mode message for move review cursor to end of selection command.
+			"Moves the review cursor to the last character of the selection, and speaks it",
+		),
+		category=SCRCAT_TEXTREVIEW,
+		gesture="kb:NVDA+alt+end",
+	)
+	def script_review_endOfSelection(self, gesture: inputCore.InputGesture):
+		info = self._getSelection()
+		if info is None or info.isCollapsed:
+			ui.message(NO_SELECTION_MESSAGE)
+			return
+		info.move(textInfos.UNIT_CHARACTER, -1, "end")
+		info.collapse(end=True)
+
+		# This script is available on the lock screen via getSafeScripts, as such
+		# ensure the review position does not contain secure information
+		# before announcing this object
+		if api.setReviewPosition(info):
+			info.expand(textInfos.UNIT_CHARACTER)
+			speech.speakTextInfo(
+				info,
+				unit=textInfos.UNIT_CHARACTER,
+				reason=controlTypes.OutputReason.CARET,
+			)
+		else:
+			ui.reviewMessage(gui.blockAction.Context.WINDOWS_LOCKED.translatedMessage)
+
 	def _getCurrentLanguageForTextInfo(self, info):
 		curLanguage = None
 		if config.conf["speech"]["autoLanguageSwitching"]:
@@ -2344,7 +2477,7 @@ class GlobalCommands(ScriptableObject):
 	def script_review_sayAll(self, gesture: inputCore.InputGesture):
 		# This script is available on the lock screen via getSafeScripts
 		# SayAll.nextLine ensures insecure text is not announced.
-		sayAll.SayAllHandler.readText(sayAll.CURSOR.REVIEW)
+		sayAll.SayAllHandler.readText(sayAll.CURSOR.REVIEW, startedFromScript=True)
 
 	@script(
 		# Translators: Input help mode message for say all with system caret command.
@@ -2354,7 +2487,7 @@ class GlobalCommands(ScriptableObject):
 		speakOnDemand=True,
 	)
 	def script_sayAll(self, gesture: inputCore.InputGesture):
-		sayAll.SayAllHandler.readText(sayAll.CURSOR.CARET)
+		sayAll.SayAllHandler.readText(sayAll.CURSOR.CARET, startedFromScript=True)
 
 	def _reportFormattingHelper(self, info, browseable=False):
 		# Report all formatting-related changes regardless of user settings
@@ -2366,7 +2499,7 @@ class GlobalCommands(ScriptableObject):
 		reportFormattingOptions = (
 			"reportFontName",
 			"reportFontSize",
-			"reportFontAttributes",
+			"fontAttributeReporting",
 			"reportSuperscriptsAndSubscripts",
 			"reportHighlight",
 			"reportColor",
@@ -2430,6 +2563,8 @@ class GlobalCommands(ScriptableObject):
 				message,
 				# Translators: title for formatting information dialog.
 				_("Formatting"),
+				copyButton=True,
+				closeButton=True,
 			)
 
 	@staticmethod
@@ -2916,7 +3051,7 @@ class GlobalCommands(ScriptableObject):
 	def script_speakForeground(self, gesture):
 		obj = api.getForegroundObject()
 		if obj:
-			sayAll.SayAllHandler.readObjects(obj)
+			sayAll.SayAllHandler.readObjects(obj, startedFromScript=True)
 
 	@script(
 		gesture="kb(desktop):NVDA+control+f2",
@@ -3145,7 +3280,7 @@ class GlobalCommands(ScriptableObject):
 		focus = api.getFocusObject()
 		message = ""
 		mod = focus.appModule
-		if isinstance(mod, appModuleHandler.AppModule) and type(mod) != appModuleHandler.AppModule:
+		if isinstance(mod, appModuleHandler.AppModule) and type(mod) is not appModuleHandler.AppModule:
 			# Translators: Indicates the name of the appModule for the current program (example output: explorer module is loaded).
 			# This message will not be presented if there is no module for the current program.
 			message = _(" %s module is loaded. ") % mod.appModuleName.split(".")[0]
@@ -3581,6 +3716,38 @@ class GlobalCommands(ScriptableObject):
 		# To hide or show cursor immediately on braille line
 		braille.handler._updateDisplay()
 		ui.message(state)
+
+	@script(
+		# Translators: Input help mode message for speak on routing command.
+		description=_("Toggles speaking the character under the cursor when routing cursor in text"),
+		category=SCRCAT_BRAILLE,
+	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
+	def script_braille_toggleSpeakOnRouting(self, gesture):
+		state = config.conf["braille"]["speakOnRouting"] = not config.conf["braille"]["speakOnRouting"]
+		if state:
+			# Translators: The message announced when toggling on speaking character when routing.
+			state = _("Enabled speak character when routing cursor in text")
+		else:
+			# Translators: The message announced when toggling off speaking character when routing.
+			state = _("Disabled speak character when routing cursor in text")
+		ui.message(state)
+
+	@script(
+		# Translators: Input help mode message for toggle speaking when navigating by lines or paragraphs with braille.
+		description=_("Toggles on and off speaking when navigating by lines or paragraph with braille"),
+		category=SCRCAT_BRAILLE,
+	)
+	@gui.blockAction.when(gui.blockAction.Context.BRAILLE_MODE_SPEECH_OUTPUT)
+	def script_toggleSpeakingOnNavigatingByUnit(self, gesture: inputCore.InputGesture):
+		toggleBooleanValue(
+			configSection="braille",
+			configKey="speakOnNavigatingByUnit",
+			# Translators: The message announced when toggling the speaking on navigating by unit braille setting.
+			enabledMsg=_("Speak whenn navigating by line or paragraph with braille on"),
+			# Translators: The message announced when toggling the speaking on navigating by unit braille setting.
+			disabledMsg=_("Speak when navigating by line or paragraph with braille off"),
+		)
 
 	@script(
 		# Translators: Input help mode message for cycle braille cursor shape command.
@@ -4113,47 +4280,49 @@ class GlobalCommands(ScriptableObject):
 	) -> None:
 		"""Generates a ui.message or ui.browseableMessage of a link's destination, if focus or caret is
 		positioned on a link, or an element with an included link such as a graphic.
-		@param forceBrowseable: skips the press once check, and displays the browseableMessage version.
+		:param forceBrowseable: skips the press once check, and displays the browseableMessage version.
 		"""
+		focus = api.getFocusObject()
 		try:
 			ti: textInfos.TextInfo = api.getCaretPosition()
 		except RuntimeError:
-			log.debugWarning("Unable to get the caret position.", exc_info=True)
-			ti: textInfos.TextInfo = api.getFocusObject().makeTextInfo(textInfos.POSITION_FIRST)
-		ti.expand(textInfos.UNIT_CHARACTER)
-		obj: NVDAObject = ti.NVDAObjectAtStart
+			try:
+				link = focus.linkData
+			except NotImplementedError:
+				link = None
+		else:
+			link = ti._getLinkDataAtCaretPosition()
 		presses = scriptHandler.getLastScriptRepeatCount()
-		if obj.role == controlTypes.role.Role.GRAPHIC and (
-			obj.parent and obj.parent.role == controlTypes.role.Role.LINK
-		):
-			# In Firefox, graphics with a parent link also expose the parents link href value.
-			# In Chromium, the link href value must be fetched from the parent object. (#14779)
-			obj = obj.parent
-		if (
-			obj.role == controlTypes.role.Role.LINK  # If it's a link, or
-			or controlTypes.state.State.LINKED in obj.states  # if it isn't a link but contains one
-		):
-			linkDestination = obj.value
-			if linkDestination is None:
-				# Translators: Informs the user that the link has no destination
+		if link:
+			if not link.destination:  # May be None or ""
+				# Translators: Reported when using the command to report the destination of a link.
 				ui.message(_("Link has no apparent destination"))
 				return
 			if (
 				presses == 1  # If pressed twice, or
 				or forceBrowseable  # if a browseable message is preferred unconditionally
 			):
+				text = link.displayText
+				if text is None:
+					# Translators: Title of the browseable message when requesting the destination of a graphical link.
+					text = _("Graphic")
 				ui.browseableMessage(
-					linkDestination,
+					link.destination,
 					# Translators: Informs the user that the window contains the destination of the
 					# link with given title
-					title=_("Destination of: {name}").format(name=obj.name),
+					title=_("Destination of: {name}").format(name=text),
+					closeButton=True,
+					copyButton=True,
 				)
 			elif presses == 0:  # One press
-				ui.message(linkDestination)  # Speak the link
+				ui.message(link.destination)  # Speak the link
 			else:  # Some other number of presses
 				return  # Do nothing
+		elif focus.role == controlTypes.Role.LINK or controlTypes.State.LINKED in focus.states:
+			# Translators: Reported when using the command to report the destination of a link.
+			ui.message(_("Unable to get the destination of this link."))
 		else:
-			# Translators: Tell user that the command has been run on something that is not a link
+			# Translators: Reported when using the command to report the destination of a link.
 			ui.message(_("Not a link."))
 
 	@script(
@@ -4675,6 +4844,49 @@ class GlobalCommands(ScriptableObject):
 	)
 	def script_cycleSoundSplit(self, gesture: "inputCore.InputGesture") -> None:
 		audio._toggleSoundSplitState()
+
+	@script(
+		description=_(
+			# Translators: Describes a command.
+			"Increases the volume of other applications",
+		),
+		category=SCRCAT_AUDIO,
+		gesture="kb:NVDA+alt+pageUp",
+	)
+	def script_increaseApplicationsVolume(self, gesture: "inputCore.InputGesture") -> None:
+		appsVolume._adjustAppsVolume(5)
+
+	@script(
+		description=_(
+			# Translators: Describes a command.
+			"Decreases the volume of other applications",
+		),
+		category=SCRCAT_AUDIO,
+		gesture="kb:NVDA+alt+pageDown",
+	)
+	def script_decreaseApplicationsVolume(self, gesture: "inputCore.InputGesture") -> None:
+		appsVolume._adjustAppsVolume(-5)
+
+	@script(
+		description=_(
+			# Translators: Describes a command.
+			"Toggles application volume control on and off",
+		),
+		category=SCRCAT_AUDIO,
+	)
+	def script_toggleApplicationsVolumeAdjuster(self, gesture: "inputCore.InputGesture") -> None:
+		appsVolume._toggleAppsVolumeState()
+
+	@script(
+		description=_(
+			# Translators: Describes a command.
+			"Mutes or unmutes other applications",
+		),
+		category=SCRCAT_AUDIO,
+		gesture="kb:NVDA+alt+delete",
+	)
+	def script_toggleApplicationsMute(self, gesture: "inputCore.InputGesture") -> None:
+		appsVolume._toggleAppsVolumeMute()
 
 
 #: The single global commands instance.

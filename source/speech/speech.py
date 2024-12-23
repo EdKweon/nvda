@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2006-2023 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
+# Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
 # Julien Cochuyt, Derek Riemer, Cyrille Bougot, Leonard de Ruijter, Łukasz Golonka
 
 """High-level functions to speak information."""
@@ -25,8 +25,9 @@ import speechDictHandler
 import characterProcessing
 import languageHandler
 from textUtils import unicodeNormalize
+from textUtils.uniscribe import splitAtCharacterBoundaries
 from . import manager
-from .extensions import speechCanceled, pre_speechCanceled, pre_speech
+from .extensions import speechCanceled, post_speechPaused, pre_speechCanceled, pre_speech
 from .extensions import filter_speechSequence
 from .commands import (
 	# Commands that are used in this file.
@@ -66,6 +67,7 @@ from config.configFlags import (
 	ReportLineIndentation,
 	ReportTableHeaders,
 	ReportCellBorders,
+	OutputMode,
 )
 import aria
 from .priorities import Spri
@@ -209,6 +211,7 @@ def cancelSpeech():
 
 def pauseSpeech(switch):
 	getSynth().pause(switch)
+	post_speechPaused.notify(switch=switch)
 	_speechState.isPaused = switch
 	_speechState.beenCanceled = False
 
@@ -417,11 +420,12 @@ def _getSpellingSpeechWithoutCharMode(
 	reportNormalizedForCharacterNavigation: bool = False,
 ) -> Generator[SequenceItemT, None, None]:
 	"""
-	Processes text when spoken by character.
+	Processes text when spelling by character.
 	This doesn't take care of character mode (Option "Use spelling functionality").
 	:param text: The text to speak.
-		This is usually one character or a string containing a decomposite character (or glyph)
-	:param locale: The locale used to generate character descrptions, if applicable.
+		This is usually one character or a string containing a decomposite character (or glyph),
+		however it can also be a word or line of text spoken by a spell command.
+	:param locale: The locale used to generate character descriptions, if applicable.
 	:param useCharacterDescriptions: Whether or not to use character descriptions,
 		e.g. speak "a" as "alpha".
 	:param sayCapForCapitals: Indicates if 'cap' should be reported
@@ -452,15 +456,20 @@ def _getSpellingSpeechWithoutCharMode(
 		text = text.rstrip()
 
 	textLength = len(text)
-	isNormalized = False
+	textIsNormalized = False
 	if unicodeNormalization and textLength > 1:
 		normalized = unicodeNormalize(text)
 		if len(normalized) == 1:
 			# Normalization of a composition
 			text = normalized
-			isNormalized = True
+			textIsNormalized = True
 	localeHasConjuncts = True if locale.split("_", 1)[0] in LANGS_WITH_CONJUNCT_CHARS else False
-	charDescList = getCharDescListFromText(text, locale) if localeHasConjuncts else text
+	if localeHasConjuncts:
+		charDescList = getCharDescListFromText(text, locale)
+	elif not textIsNormalized and unicodeNormalization:
+		charDescList = list(splitAtCharacterBoundaries(text))
+	else:
+		charDescList = text
 	for item in charDescList:
 		if localeHasConjuncts:
 			# item is a tuple containing character and its description
@@ -471,6 +480,7 @@ def _getSpellingSpeechWithoutCharMode(
 			speakCharAs = item
 			if useCharacterDescriptions:
 				charDesc = characterProcessing.getCharacterDescription(locale, speakCharAs.lower())
+		itemIsNormalized = textIsNormalized
 		uppercase = speakCharAs.isupper()
 		if useCharacterDescriptions and charDesc:
 			IDEOGRAPHIC_COMMA = "\u3001"
@@ -480,10 +490,12 @@ def _getSpellingSpeechWithoutCharMode(
 		else:
 			if (symbol := characterProcessing.processSpeechSymbol(locale, speakCharAs)) != speakCharAs:
 				speakCharAs = symbol
-			elif not isNormalized and unicodeNormalization:
+			elif not textIsNormalized and unicodeNormalization:
 				if (normalized := unicodeNormalize(speakCharAs)) != speakCharAs:
-					speakCharAs = " ".join(normalized)
-					isNormalized = True
+					speakCharAs = " ".join(
+						characterProcessing.processSpeechSymbol(locale, normChar) for normChar in normalized
+					)
+					itemIsNormalized = True
 		if config.conf["speech"]["autoLanguageSwitching"]:
 			yield LangChangeCommand(locale)
 		yield from _getSpellingCharAddCapNotification(
@@ -491,7 +503,7 @@ def _getSpellingSpeechWithoutCharMode(
 			uppercase and sayCapForCapitals,
 			capPitchChange if uppercase else 0,
 			uppercase and beepForCapitals,
-			isNormalized and reportNormalizedForCharacterNavigation,
+			itemIsNormalized and reportNormalizedForCharacterNavigation,
 		)
 		yield EndUtteranceCommand()
 
@@ -1087,11 +1099,13 @@ def speak(  # noqa: C901
 		from .sayAll import SayAllHandler
 
 		script = getCurrentScript()
-		if not (
+		if (
 			(script and getattr(script, "speakOnDemand", False))
 			or inputCore.manager.isInputHelpActive
-			or SayAllHandler.isRunning()
+			or (SayAllHandler.isRunning() and SayAllHandler.startedFromScript)
 		):
+			pass  # Do nothing and continue
+		else:
 			return
 	_speechState.beenCanceled = False
 	# Filter out redundant LangChangeCommand objects
@@ -1107,7 +1121,7 @@ def speak(  # noqa: C901
 	for item in oldSpeechSequence:
 		if isinstance(item, LangChangeCommand):
 			if not autoLanguageSwitching:
-				continue  # noqa: E701
+				continue
 			curLanguage = item.lang
 			if not curLanguage or (
 				not autoDialectSwitching and curLanguage.split("_")[0] == defaultLanguageRoot
@@ -1118,7 +1132,7 @@ def speak(  # noqa: C901
 				continue
 		elif isinstance(item, str):
 			if not item:
-				continue  # noqa: E701
+				continue
 			if autoLanguageSwitching and curLanguage != prevLanguage:
 				speechSequence.append(LangChangeCommand(curLanguage))
 				prevLanguage = curLanguage
@@ -1787,7 +1801,7 @@ def getTextInfoSpeech(  # noqa: C901
 		else:
 			speechSequence.extend(indentationSpeech)
 		if speakTextInfoState:
-			speakTextInfoState.indentationCache = allIndentation  # noqa: E701
+			speakTextInfoState.indentationCache = allIndentation
 	# Don't add this text if it is blank.
 	relativeBlank = True
 	for x in relativeSpeechSequence:
@@ -2781,12 +2795,12 @@ def getFormatFieldSpeech(  # noqa: C901
 				else _("not emphasised")
 			)
 			textList.append(text)
-	if formatConfig["reportFontAttributes"]:
+	if formatConfig["fontAttributeReporting"] & OutputMode.SPEECH:
 		bold = attrs.get("bold")
 		oldBold = attrsCache.get("bold") if attrsCache is not None else None
 		if (bold or oldBold is not None) and bold != oldBold:
-			# Translators: Reported when text is bolded.
 			text = (
+				# Translators: Reported when text is bolded.
 				_("bold")
 				if bold
 				# Translators: Reported when text is not bolded.

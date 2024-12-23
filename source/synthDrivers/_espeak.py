@@ -283,7 +283,7 @@ def getVoiceList():
 	voiceList = []
 	for voice in voices:
 		if not voice:
-			break  # noqa: E701
+			break
 		voiceList.append(voice.contents)
 	return voiceList
 
@@ -383,7 +383,6 @@ def initialize(indexCallback=None):
 		samplesPerSec=sampleRate,
 		bitsPerSample=16,
 		outputDevice=config.conf["speech"]["outputDevice"],
-		buffered=True,
 	)
 	onIndexReached = indexCallback
 	espeakDLL.espeak_SetSynthCallback(callback)

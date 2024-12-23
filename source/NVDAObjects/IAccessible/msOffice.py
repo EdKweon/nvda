@@ -75,7 +75,7 @@ class SDM(IAccessible):
 			):
 				obj = getNVDAObjectFromEvent(hwndFocus, winUser.OBJID_CLIENT, 0)
 				if not obj:
-					return None  # noqa: E701
+					return None
 				if getattr(obj, "parentSDMCanOverrideName", True):
 					obj.name = self.name
 				obj.keyboardShortcut = self.keyboardShortcut
@@ -168,7 +168,6 @@ class CommandBarListItem(IAccessible):
 		if matchRGB:
 			import colors
 
-			rgb = colors.RGB.fromString(name)  # noqa: F841
 			# Translators: a color, broken down into its RGB red, green, blue parts.
 			return _("RGB red {rgb.red}, green {rgb.green}, blue {rgb.blue}").format(
 				rgb=colors.RGB.fromString(name),

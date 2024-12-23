@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2022-2023 NV Access Limited, Cyrille Bougot
+# Copyright (C) 2022-2024 NV Access Limited, Cyrille Bougot, Leonard de Ruijter
 import enum
 import typing
 import unittest
@@ -29,6 +29,7 @@ from config.profileUpgradeSteps import (
 	_upgradeConfigFrom_8_to_9_showMessages,
 	_upgradeConfigFrom_8_to_9_tetherTo,
 	upgradeConfigFrom_9_to_10,
+	upgradeConfigFrom_11_to_12,
 )
 from config.configFlags import (
 	NVDAKey,
@@ -36,6 +37,7 @@ from config.configFlags import (
 	ReportLineIndentation,
 	ReportCellBorders,
 	TetherTo,
+	OutputMode,
 )
 from utils.displayString import (
 	DisplayStringEnum,
@@ -784,6 +786,55 @@ class Config_profileUpgradeSteps_upgradeConfigFrom_9_to_10(unittest.TestCase):
 		)
 
 
+class Config_upgradeProfileSteps_upgradeProfileFrom_11_to_12(unittest.TestCase):
+	def test_DefaultProfile_Unmodified(self):
+		"""reportFontAttributes unmodified."""
+		configString = "[documentFormatting]"
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_11_to_12(profile)
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportFontAttributes"]
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["fontAttributeReporting"]
+
+	def test_defaultProfile_reportFontAttributes_false(self):
+		"""reportFontAttributes set to False."""
+		configString = """
+		[documentFormatting]
+		reportFontAttributes = False
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_11_to_12(profile)
+		self.assertEqual(profile["documentFormatting"]["reportFontAttributes"], "False")
+		self.assertEqual(profile["documentFormatting"]["fontAttributeReporting"], OutputMode.OFF.value)
+
+	def test_defaultProfile_reportFontAttributes_true(self):
+		"""reportFontAttributes set to True."""
+		configString = """
+		[documentFormatting]
+		reportFontAttributes = True
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_11_to_12(profile)
+		self.assertEqual(profile["documentFormatting"]["reportFontAttributes"], "True")
+		self.assertEqual(
+			profile["documentFormatting"]["fontAttributeReporting"],
+			OutputMode.SPEECH_AND_BRAILLE.value,
+		)
+
+	def test_defaultProfile_reportFontAttributes_invalid(self):
+		"""reportFontAttributes set to a non-boolean value."""
+		configString = """
+		[documentFormatting]
+		reportFontAttributes = notABool
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_11_to_12(profile)
+		self.assertEqual(profile["documentFormatting"]["reportFontAttributes"], "notABool")
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["fontAttributeReporting"]
+
+
 class Config_AggregatedSection_getitem(unittest.TestCase):
 	def setUp(self):
 		manager = MagicMock(ConfigManager())
@@ -833,3 +884,29 @@ class Config_AggregatedSection_setitem(unittest.TestCase):
 		self.assertIs(self.testSection["foo"], defaultFlag)
 		self.testSection["foo"] = valueOfDefaultFlag
 		self.assertIs(self.testSection["foo"], valueOfDefaultFlag)
+
+
+class Config_AggregatedSection_pollution(unittest.TestCase):
+	"""Ënsure that config profiles don't get polluted with overridden values equal to the base config"""
+
+	def setUp(self):
+		manager = ConfigManager()
+		spec = configobj.ConfigObj({"someBool": "boolean(default=True)"})
+		self.baseConfig = configobj.ConfigObj({"someBool": True})
+		self.profile = configobj.ConfigObj()
+		self.testSection = AggregatedSection(
+			manager=manager,
+			path=(),
+			spec=spec,
+			profiles=[self.baseConfig, self.profile],
+		)
+
+	def test_updateToSameValue(self):
+		self.testSection["someBool"] = True
+		# Since we set someBool to its existing value, don't touch the profile.
+		self.assertEqual(self.profile, {})
+
+	def test_updateToDifferentValue(self):
+		self.testSection["someBool"] = False
+		# Since we set someBool to a different value, update the profile.
+		self.assertEqual(self.profile, {"someBool": False})

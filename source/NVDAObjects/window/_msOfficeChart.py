@@ -519,12 +519,12 @@ class OfficeChartElementList(Window):
 			ui.message(self.name)
 		else:
 			if self.activeElement == None:  # noqa: E711
-				self.activeElement = self.elementList[0]  # noqa: E701, E711
+				self.activeElement = self.elementList[0]
 			else:
 				if direction == "previous":
-					self.activeElement = self.activeElement.previous  # noqa: E701
+					self.activeElement = self.activeElement.previous
 				elif direction == "next":
-					self.activeElement = self.activeElement.next  # noqa: E701
+					self.activeElement = self.activeElement.next
 			self.activeElement.select()
 			eventHandler.queueEvent("gainFocus", self.activeElement)
 
@@ -773,10 +773,10 @@ class OfficeChartElementSeries(OfficeChartElementList):
 			)
 
 	def _get_name(self):
-		currentSeries = self.officeChartObject.SeriesCollection(self.seriesIndex)  # noqa: F841
+		currentSeries = self.officeChartObject.SeriesCollection(self.seriesIndex)
 		# Translators: Details about a series in a chart. For example, this might report "foo series 1 of 2"
 		seriesText = _("{seriesName} series {seriesIndex} of {seriesCount}").format(
-			seriesName=self.officeChartObject.SeriesCollection(self.seriesIndex).Name,
+			seriesName=currentSeries.Name,
 			seriesIndex=self.seriesIndex,
 			seriesCount=self.seriesCount,
 		)

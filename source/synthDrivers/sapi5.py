@@ -14,9 +14,9 @@ import winreg
 import audioDucking
 from synthDriverHandler import SynthDriver, VoiceInfo, synthIndexReached, synthDoneSpeaking
 import config
-import nvwave
 from logHandler import log
 import weakref
+import languageHandler
 
 from speech.commands import (
 	IndexCommand,
@@ -204,9 +204,10 @@ class SynthDriver(SynthDriver):
 			# Therefore, set the voice before setting the audio output.
 			# Otherwise, we will get poor speech quality in some cases.
 			self.tts.voice = voice
-		outputDeviceID = nvwave.outputDeviceNameToID(config.conf["speech"]["outputDevice"], True)
-		if outputDeviceID >= 0:
-			self.tts.audioOutput = self.tts.getAudioOutputs()[outputDeviceID]
+		for audioOutput in self.tts.GetAudioOutputs():
+			if audioOutput.GetDescription() == config.conf["speech"]["outputDevice"]:
+				self.tts.audioOutput = audioOutput
+				break
 		self._eventsConnection = comtypes.client.GetEvents(self.tts, SapiSink(weakref.ref(self)))
 		self.tts.EventInterests = (
 			SpeechVoiceEvents.StartInputStream | SpeechVoiceEvents.Bookmark | SpeechVoiceEvents.EndInputStream
@@ -338,6 +339,20 @@ class SynthDriver(SynthDriver):
 					log.debugWarning("Couldn't convert character in IPA string: %s" % item.ipa)
 					if item.text:
 						textList.append(item.text)
+			elif isinstance(item, LangChangeCommand):
+				lcid = (
+					languageHandler.localeNameToWindowsLCID(item.lang)
+					if item.lang
+					else languageHandler.LCID_NONE
+				)
+				if lcid is languageHandler.LCID_NONE:
+					try:
+						del tags["lang"]
+					except KeyError:
+						pass
+				else:
+					tags["lang"] = {"langid": "%x" % lcid}
+				tagsChanged[0] = True
 			elif isinstance(item, SpeechCommand):
 				log.debugWarning("Unsupported speech command: %s" % item)
 			else:
