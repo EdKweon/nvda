@@ -1,12 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2007-2023 NV Access Limited, Aleksey Sadovoy, Cyrille Bougot, Peter Vágner, Babbage B.V.,
+# Copyright (C) 2007-2024 NV Access Limited, Aleksey Sadovoy, Cyrille Bougot, Peter Vágner, Babbage B.V.,
 # Leonard de Ruijter, James Teh
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-"""Provides a simple Python interface to playing audio using the Windows multimedia waveOut functions, as well as other useful utilities."""
+"""Provides a simple Python interface to playing audio using the Windows Audio Session API (WASAPI), as well as other useful utilities."""
 
-from collections.abc import Generator
 import threading
 import typing
 from typing import (
@@ -39,15 +38,13 @@ import extensionPoints
 import NVDAHelper
 import core
 import globalVars
-from pycaw.utils import AudioUtilities
-from pycaw.constants import EDataFlow, DEVICE_STATE
+from speech import SpeechSequence
+from speech.commands import BreakCommand
+from synthDriverHandler import pre_synthSpeak
 
 
 __all__ = (
 	"WavePlayer",
-	"getOutputDeviceNames",
-	"outputDeviceIDToName",
-	"outputDeviceNameToID",
 	"decide_playWaveFile",
 )
 
@@ -87,59 +84,6 @@ class AudioPurpose(Enum):
 
 	SPEECH = auto()
 	SOUNDS = auto()
-
-
-def _getOutputDevices() -> Generator[tuple[str, str]]:
-	"""Generator, yielding device ID and device Name in device ID order.
-	..note: Depending on number of devices being fetched, this may take some time (~3ms)
-	"""
-	endpointCollection = AudioUtilities.GetDeviceEnumerator().EnumAudioEndpoints(
-		EDataFlow.eRender.value,
-		DEVICE_STATE.ACTIVE.value,
-	)
-	for i in range(endpointCollection.GetCount()):
-		device = AudioUtilities.CreateDevice(endpointCollection.Item(i))
-		# This should never be None, but just to be sure
-		if device is not None:
-			yield device.id, device.FriendlyName
-		else:
-			continue
-
-
-def getOutputDeviceNames() -> list[str]:
-	"""Obtain the names of all audio output devices on the system.
-	:return: The names of all output devices on the system.
-	..note: Depending on number of devices being fetched, this may take some time (~3ms)
-	"""
-	return [name for ID, name in _getOutputDevices()]
-
-
-def outputDeviceIDToName(ID: str) -> str:
-	"""Obtain the name of an output device given its device ID.
-	:param ID: The device ID.
-	:return: The device name.
-	"""
-	device = AudioUtilities.GetDeviceEnumerator().GetDevice(id)
-	return AudioUtilities.CreateDevice(device).FriendlyName
-
-
-def outputDeviceNameToID(name: str, useDefaultIfInvalid: bool = False) -> str:
-	"""Obtain the device ID of an output device given its name.
-	:param name: The device name.
-	:param useDefaultIfInvalid: `True` to use the default device if there is no such device, `False` to raise an exception.
-	:return: The device ID.
-	:raise LookupError: If there is no such device and `useDefaultIfInvalid` is `False`.
-	..note: Depending on number of devices, and the position of the device in the list, this may take some time (~3ms)
-	"""
-	for curID, curName in _getOutputDevices():
-		if curName == name:
-			return curID
-
-	# No such ID.
-	if useDefaultIfInvalid:
-		return AudioUtilities.GetSpeakers().GetId()
-	else:
-		raise LookupError("No such device name")
 
 
 def playWaveFile(
@@ -194,7 +138,7 @@ def playWaveFile(
 		channels=f.getnchannels(),
 		samplesPerSec=f.getframerate(),
 		bitsPerSample=f.getsampwidth() * 8,
-		outputDevice=config.conf["speech"]["outputDevice"],
+		outputDevice=config.conf["audio"]["outputDevice"],
 		wantDucking=False,
 		purpose=AudioPurpose.SOUNDS,
 	)
@@ -225,7 +169,7 @@ def isInError() -> bool:
 wasPlay_callback = CFUNCTYPE(None, c_void_p, c_uint)
 
 
-class WasapiWavePlayer(garbageHandler.TrackedObject):
+class WavePlayer(garbageHandler.TrackedObject):
 	"""Synchronously play a stream of audio using WASAPI.
 	To use, construct an instance and feed it waveform audio using L{feed}.
 	Keeps device open until it is either not available, or WavePlayer is explicitly closed / deleted.
@@ -247,7 +191,7 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 	#: Whether there is a pending stream idle check.
 	_isIdleCheckPending: bool = False
 	#: Use the default device, this is the configSpec default value.
-	DEFAULT_DEVICE_KEY = typing.cast(str, config.conf.getConfigValidation(("speech", "outputDevice")).default)
+	DEFAULT_DEVICE_KEY = typing.cast(str, config.conf.getConfigValidation(("audio", "outputDevice")).default)
 	#: The silence output device, None if not initialized.
 	_silenceDevice: typing.Optional[str] = None
 
@@ -292,24 +236,32 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 		self._player = NVDAHelper.localLib.wasPlay_create(
 			outputDevice,
 			format,
-			WasapiWavePlayer._callback,
+			WavePlayer._callback,
 		)
 		self._doneCallbacks = {}
 		self._instances[self._player] = self
 		self.open()
 		self._lastActiveTime: typing.Optional[float] = None
 		self._isPaused: bool = False
-		if config.conf["audio"]["audioAwakeTime"] > 0 and WasapiWavePlayer._silenceDevice != outputDevice:
+		if config.conf["audio"]["audioAwakeTime"] > 0 and WavePlayer._silenceDevice != outputDevice:
 			# The output device has changed. (Re)initialize silence.
 			if self._silenceDevice is not None:
 				NVDAHelper.localLib.wasSilence_terminate()
 			if config.conf["audio"]["audioAwakeTime"] > 0:
 				NVDAHelper.localLib.wasSilence_init(outputDevice)
-				WasapiWavePlayer._silenceDevice = outputDevice
+				WavePlayer._silenceDevice = outputDevice
+		# Enable trimming by default for speech only
+		self.enableTrimmingLeadingSilence(
+			purpose is AudioPurpose.SPEECH and config.conf["speech"]["trimLeadingSilence"],
+		)
+		if self._enableTrimmingLeadingSilence:
+			self.startTrimmingLeadingSilence()
+		self._isLeadingSilenceInserted: bool = False
+		pre_synthSpeak.register(self._onPreSpeak)
 
 	@wasPlay_callback
 	def _callback(cppPlayer, feedId):
-		pyPlayer = WasapiWavePlayer._instances[cppPlayer]
+		pyPlayer = WavePlayer._instances[cppPlayer]
 		onDone = pyPlayer._doneCallbacks.pop(feedId, None)
 		if onDone:
 			onDone()
@@ -330,6 +282,7 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 			# a weakref callback can run before __del__ in some cases, which would mean
 			# it has already been removed from _instances.
 			self._player = None
+		pre_synthSpeak.unregister(self._onPreSpeak)
 
 	def open(self):
 		"""Open the output device.
@@ -340,11 +293,11 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 			NVDAHelper.localLib.wasPlay_open(self._player)
 		except WindowsError:
 			log.warning(
-				"Couldn't open specified or default audio device. " "There may be no audio devices.",
+				"Couldn't open specified or default audio device. There may be no audio devices.",
 			)
 			WavePlayer.audioDeviceError_static = True
 			raise
-		WasapiWavePlayer.audioDeviceError_static = False
+		WavePlayer.audioDeviceError_static = False
 		self._setVolumeFromConfig()
 
 	def close(self):
@@ -374,6 +327,10 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 		feedId = c_uint() if onDone else None
 		# Never treat this instance as idle while we're feeding.
 		self._lastActiveTime = None
+		# If a BreakCommand is used to insert leading silence in this utterance,
+		# turn off trimming temporarily.
+		if self._purpose is AudioPurpose.SPEECH and self._isLeadingSilenceInserted:
+			self.startTrimmingLeadingSilence(False)
 		try:
 			NVDAHelper.localLib.wasPlay_feed(
 				self._player,
@@ -410,6 +367,8 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 	def idle(self):
 		"""Indicate that this player is now idle; i.e. the current continuous segment  of audio is complete."""
 		self.sync()
+		if self._enableTrimmingLeadingSilence:
+			self.startTrimmingLeadingSilence()
 		if self._audioDucker:
 			self._audioDucker.disable()
 
@@ -418,6 +377,8 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 		if self._audioDucker:
 			self._audioDucker.disable()
 		NVDAHelper.localLib.wasPlay_stop(self._player)
+		if self._enableTrimmingLeadingSilence:
+			self.startTrimmingLeadingSilence()
 		self._lastActiveTime = None
 		self._isPaused = False
 		self._doneCallbacks = {}
@@ -472,6 +433,17 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 			if not (all and e.winerror == E_INVALIDARG):
 				raise
 
+	def enableTrimmingLeadingSilence(self, enable: bool) -> None:
+		"""Enable or disable automatic leading silence removal.
+		This is by default enabled for speech audio, and disabled for non-speech audio."""
+		self._enableTrimmingLeadingSilence = enable
+		if not enable:
+			self.startTrimmingLeadingSilence(False)
+
+	def startTrimmingLeadingSilence(self, start: bool = True) -> None:
+		"""Start or stop trimming the leading silence from the next audio chunk."""
+		NVDAHelper.localLib.wasPlay_startTrimmingLeadingSilence(self._player, start)
+
 	def _setVolumeFromConfig(self):
 		if self._purpose is not AudioPurpose.SOUNDS:
 			return
@@ -525,6 +497,8 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 			if player._lastActiveTime <= threshold:
 				try:
 					NVDAHelper.localLib.wasPlay_idle(player._player)
+					if player._enableTrimmingLeadingSilence:
+						player.startTrimmingLeadingSilence()
 				except OSError:
 					# #16125: IAudioClock::GetPosition sometimes fails with an access
 					# violation on a device which has been invalidated. This shouldn't happen
@@ -541,8 +515,17 @@ class WasapiWavePlayer(garbageHandler.TrackedObject):
 			# Schedule another check here in case feed isn't called for a while.
 			cls._scheduleIdleCheck()
 
+	def _onPreSpeak(self, speechSequence: SpeechSequence):
+		self._isLeadingSilenceInserted = False
+		# Check if leading silence of the current utterance is inserted by a BreakCommand.
+		for item in speechSequence:
+			if isinstance(item, BreakCommand):
+				self._isLeadingSilenceInserted = True
+				break
+			elif isinstance(item, str):
+				break
 
-WavePlayer = WasapiWavePlayer
+
 fileWavePlayer: Optional[WavePlayer] = None
 fileWavePlayerThread: threading.Thread | None = None
 
@@ -567,7 +550,7 @@ def initialize():
 
 
 def terminate() -> None:
-	if WasapiWavePlayer._silenceDevice is not None:
+	if WavePlayer._silenceDevice is not None:
 		NVDAHelper.localLib.wasSilence_terminate()
 	getOnErrorSoundRequested().unregister(playErrorSound)
 

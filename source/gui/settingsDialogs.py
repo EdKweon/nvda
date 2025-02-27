@@ -1,13 +1,14 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy,
+# Copyright (C) 2006-2025 NV Access Limited, Peter Vágner, Aleksey Sadovoy,
 # Rui Batista, Joseph Lee, Heiko Folkerts, Zahari Yurukov, Leonard de Ruijter,
 # Derek Riemer, Babbage B.V., Davy Kager, Ethan Holliger, Bill Dengler,
 #  Thomas Stivers, Julien Cochuyt, Peter Vágner, Cyrille Bougot, Mesar Hameed,
 # Łukasz Golonka, Aaron Cannon, Adriani90, André-Abush Clause, Dawid Pieper,
 # Takuya Nishimoto, jakubl7545, Tony Malykh, Rob Meredith,
-# Burman's Computer and Education Ltd, hwf1324.
+# Burman's Computer and Education Ltd, hwf1324, Cary-rowen.
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
+
 import logging
 from abc import ABCMeta, abstractmethod
 import copy
@@ -20,6 +21,7 @@ import requests
 import wx
 from NVDAState import WritePaths
 
+from utils import mmdevice
 from vision.providerBase import VisionEnhancementProviderSettings
 from wx.lib.expando import ExpandoTextCtrl
 import wx.lib.newevent
@@ -38,6 +40,7 @@ from config.configFlags import (
 	ReportTableHeaders,
 	ReportCellBorders,
 	OutputMode,
+	TypingEcho,
 )
 import languageHandler
 import speech
@@ -46,13 +49,13 @@ import gui
 import gui.contextHelp
 import globalVars
 from logHandler import log
-import nvwave
 import audio
 import audioDucking
 import queueHandler
 import braille
 import brailleTables
 import brailleInput
+from addonStore.models.channel import UpdateChannel
 import vision
 import vision.providerInfo
 import vision.providerBase
@@ -980,6 +983,15 @@ class GeneralSettingsPanel(SettingsPanel):
 			if globalVars.appArgs.secure:
 				mirrorBox.Disable()
 
+		item = self.preventDisplayTurningOffCheckBox = wx.CheckBox(
+			self,
+			# Translators: The label of a checkbox in general settings.
+			label=_("Prevent &display from turning off during say all or reading with braille"),
+		)
+		self.bindHelpEvent("PreventDisplayTurningOff", self.preventDisplayTurningOffCheckBox)
+		item.Value = config.conf["general"]["preventDisplayTurningOff"]
+		settingsSizerHelper.addItem(item)
+
 	def onChangeMirrorURL(self, evt: wx.CommandEvent | wx.KeyEvent):
 		"""Show the dialog to change the update mirror URL, and refresh the dialog in response to the URL being changed."""
 		# Import late to avoid circular dependency.
@@ -1100,6 +1112,8 @@ class GeneralSettingsPanel(SettingsPanel):
 			config.conf["update"]["startupNotification"] = self.notifyForPendingUpdateCheckBox.IsChecked()
 			updateCheck.terminate()
 			updateCheck.initialize()
+
+		config.conf["general"]["preventDisplayTurningOff"] = self.preventDisplayTurningOffCheckBox.IsChecked()
 
 	def onPanelActivated(self):
 		if updateCheck:
@@ -1552,6 +1566,9 @@ class AutoSettingsMixin(metaclass=ABCMeta):
 				continue
 			if setting.id in self.sizerDict:  # update a value
 				self._updateValueForControl(setting, settingsStorage)
+			elif setting.id.startswith("_"):
+				# Skip private settings.
+				continue
 			else:  # create a new control
 				self._createNewControl(setting, settingsStorage)
 		# Update graphical layout of the dialog
@@ -1974,24 +1991,29 @@ class KeyboardSettingsPanel(SettingsPanel):
 				checkedItems.append(n)
 		self.modifierList.CheckedItems = checkedItems
 		self.modifierList.Select(0)
-
 		self.bindHelpEvent("KeyboardSettingsModifiers", self.modifierList)
-		# Translators: This is the label for a checkbox in the
-		# keyboard settings panel.
-		charsText = _("Speak typed &characters")
-		self.charsCheckBox = sHelper.addItem(wx.CheckBox(self, label=charsText))
-		self.bindHelpEvent(
-			"KeyboardSettingsSpeakTypedCharacters",
-			self.charsCheckBox,
-		)
-		self.charsCheckBox.SetValue(config.conf["keyboard"]["speakTypedCharacters"])
 
-		# Translators: This is the label for a checkbox in the
-		# keyboard settings panel.
-		speakTypedWordsText = _("Speak typed &words")
-		self.wordsCheckBox = sHelper.addItem(wx.CheckBox(self, label=speakTypedWordsText))
-		self.bindHelpEvent("KeyboardSettingsSpeakTypedWords", self.wordsCheckBox)
-		self.wordsCheckBox.SetValue(config.conf["keyboard"]["speakTypedWords"])
+		# Translators: This is the label for a combobox in the keyboard settings panel.
+		speakTypedCharsLabelText = _("Speak typed &characters:")
+		speakTypedCharsChoices = [mode.displayString for mode in TypingEcho]
+		self.speakTypedCharsList = sHelper.addLabeledControl(
+			speakTypedCharsLabelText,
+			wx.Choice,
+			choices=speakTypedCharsChoices,
+		)
+		self.bindHelpEvent("KeyboardSettingsSpeakTypedCharacters", self.speakTypedCharsList)
+		self.speakTypedCharsList.SetSelection(config.conf["keyboard"]["speakTypedCharacters"])
+
+		# Translators: This is the label for a combobox in the keyboard settings panel.
+		speakTypedWordsLabelText = _("Speak typed &words:")
+		speakTypedWordsChoices = [mode.displayString for mode in TypingEcho]
+		self.speakTypedWordsList = sHelper.addLabeledControl(
+			speakTypedWordsLabelText,
+			wx.Choice,
+			choices=speakTypedWordsChoices,
+		)
+		self.bindHelpEvent("KeyboardSettingsSpeakTypedWords", self.speakTypedWordsList)
+		self.speakTypedWordsList.SetSelection(config.conf["keyboard"]["speakTypedWords"])
 
 		# Translators: This is the label for a checkbox in the
 		# keyboard settings panel.
@@ -2091,8 +2113,8 @@ class KeyboardSettingsPanel(SettingsPanel):
 		config.conf["keyboard"]["NVDAModifierKeys"] = sum(
 			key.value for (n, key) in enumerate(NVDAKey) if self.modifierList.IsChecked(n)
 		)
-		config.conf["keyboard"]["speakTypedCharacters"] = self.charsCheckBox.IsChecked()
-		config.conf["keyboard"]["speakTypedWords"] = self.wordsCheckBox.IsChecked()
+		config.conf["keyboard"]["speakTypedCharacters"] = self.speakTypedCharsList.GetSelection()
+		config.conf["keyboard"]["speakTypedWords"] = self.speakTypedWordsList.GetSelection()
 		config.conf["keyboard"]["speechInterruptForCharacters"] = (
 			self.speechInterruptForCharsCheckBox.IsChecked()
 		)
@@ -2594,20 +2616,6 @@ class BrowseModePanel(SettingsPanel):
 		)
 		self.trapNonCommandGesturesCheckBox.SetValue(config.conf["virtualBuffers"]["trapNonCommandGestures"])
 
-		# Translators: This is the label for a checkbox in the
-		# browse mode settings panel.
-		autoFocusFocusableElementsText = _("Automatically set system &focus to focusable elements")
-		self.autoFocusFocusableElementsCheckBox = sHelper.addItem(
-			wx.CheckBox(self, label=autoFocusFocusableElementsText),
-		)
-		self.bindHelpEvent(
-			"BrowseModeSettingsAutoFocusFocusableElements",
-			self.autoFocusFocusableElementsCheckBox,
-		)
-		self.autoFocusFocusableElementsCheckBox.SetValue(
-			config.conf["virtualBuffers"]["autoFocusFocusableElements"],
-		)
-
 	def onSave(self):
 		config.conf["virtualBuffers"]["maxLineLength"] = self.maxLengthEdit.GetValue()
 		config.conf["virtualBuffers"]["linesPerPage"] = self.pageLinesEdit.GetValue()
@@ -2626,9 +2634,6 @@ class BrowseModePanel(SettingsPanel):
 		)
 		config.conf["virtualBuffers"]["trapNonCommandGestures"] = (
 			self.trapNonCommandGesturesCheckBox.IsChecked()
-		)
-		config.conf["virtualBuffers"]["autoFocusFocusableElements"] = (
-			self.autoFocusFocusableElementsCheckBox.IsChecked()
 		)
 
 
@@ -3041,17 +3046,15 @@ class AudioPanel(SettingsPanel):
 		# Translators: This is the label for the select output device combo in NVDA audio settings.
 		# Examples of an output device are default soundcard, usb headphones, etc.
 		deviceListLabelText = _("Audio output &device:")
-		# The Windows Core Audio device enumeration does not have the concept of an ID for the default output device, so we have to insert something ourselves instead.
-		# Translators: Value to show when choosing to use the default audio output device.
-		deviceNames = (_("Default output device"), *nvwave.getOutputDeviceNames())
+		self._deviceIds, deviceNames = zip(*mmdevice.getOutputDevices(includeDefault=True))
 		self.deviceList = sHelper.addLabeledControl(deviceListLabelText, wx.Choice, choices=deviceNames)
 		self.bindHelpEvent("SelectSynthesizerOutputDevice", self.deviceList)
-		selectedOutputDevice = config.conf["speech"]["outputDevice"]
-		if selectedOutputDevice == "default":
+		selectedOutputDevice = config.conf["audio"]["outputDevice"]
+		if selectedOutputDevice == config.conf.getConfigValidation(("audio", "outputDevice")).default:
 			selection = 0
 		else:
 			try:
-				selection = deviceNames.index(selectedOutputDevice)
+				selection = self._deviceIds.index(selectedOutputDevice)
 			except ValueError:
 				selection = 0
 		self.deviceList.SetSelection(selection)
@@ -3176,13 +3179,10 @@ class AudioPanel(SettingsPanel):
 		self.soundSplitModesList.Select(0)
 
 	def onSave(self):
-		# We already use "default" as the key in the config spec, so use it here as an alternative to Microsoft Sound Mapper.
-		selectedOutputDevice = (
-			"default" if self.deviceList.GetSelection() == 0 else self.deviceList.GetStringSelection()
-		)
-		if config.conf["speech"]["outputDevice"] != selectedOutputDevice:
+		selectedOutputDevice = self._deviceIds[self.deviceList.GetSelection()]
+		if config.conf["audio"]["outputDevice"] != selectedOutputDevice:
 			# Synthesizer must be reload if output device changes
-			config.conf["speech"]["outputDevice"] = selectedOutputDevice
+			config.conf["audio"]["outputDevice"] = selectedOutputDevice
 			currentSynth = getSynth()
 			if not setSynth(currentSynth.name):
 				_synthWarningDialog(currentSynth.name)
@@ -3255,9 +3255,7 @@ class AddonStorePanel(SettingsPanel):
 	def makeSettings(self, settingsSizer: wx.BoxSizer) -> None:
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		# Translators: This is a label for the automatic updates combo box in the Add-on Store Settings dialog.
-		automaticUpdatesLabelText = _("&Update notifications:")
-		# TODO: change label to the following when the feature is implemented
-		# automaticUpdatesLabelText = _("Automatic &updates:")
+		automaticUpdatesLabelText = _("Automatic &updates:")
 		self.automaticUpdatesComboBox = sHelper.addLabeledControl(
 			automaticUpdatesLabelText,
 			wx.Choice,
@@ -3266,6 +3264,27 @@ class AddonStorePanel(SettingsPanel):
 		self.bindHelpEvent("AutomaticAddonUpdates", self.automaticUpdatesComboBox)
 		index = [x.value for x in AddonsAutomaticUpdate].index(config.conf["addonStore"]["automaticUpdates"])
 		self.automaticUpdatesComboBox.SetSelection(index)
+
+		self.defaultUpdateChannelComboBox = sHelper.addLabeledControl(
+			# Translators: This is the label for the default update channel combo box in the Add-on Store Settings dialog.
+			_("Default update &channel:"),
+			wx.Choice,
+			# The default update channel for a specific add-on (UpdateChannel.DEFAULT) refers to this channel,
+			# so it should be skipped.
+			choices=[
+				channel.displayString for channel in UpdateChannel if channel is not UpdateChannel.DEFAULT
+			],
+		)
+		self.bindHelpEvent("DefaultAddonUpdateChannel", self.defaultUpdateChannelComboBox)
+		index = config.conf["addonStore"]["defaultUpdateChannel"]
+		self.defaultUpdateChannelComboBox.SetSelection(index)
+
+		self.allowIncompatibleUpdates = sHelper.addItem(
+			# Translators: Mute other apps checkbox in settings
+			wx.CheckBox(self, label=_("Allow automatic updates to install incompatible add-ons")),
+		)
+		self.bindHelpEvent("AllowIncompatibleAddonUpdates", self.allowIncompatibleUpdates)
+		self.allowIncompatibleUpdates.SetValue(config.conf["addonStore"]["allowIncompatibleUpdates"])
 
 		# Translators: The label for the mirror server on the Add-on Store Settings panel.
 		mirrorBoxSizer = wx.StaticBoxSizer(wx.HORIZONTAL, self, label=_("Mirror server"))
@@ -3343,6 +3362,8 @@ class AddonStorePanel(SettingsPanel):
 	def onSave(self):
 		index = self.automaticUpdatesComboBox.GetSelection()
 		config.conf["addonStore"]["automaticUpdates"] = [x.value for x in AddonsAutomaticUpdate][index]
+		config.conf["addonStore"]["allowIncompatibleUpdates"] = self.allowIncompatibleUpdates.IsChecked()
+		config.conf["addonStore"]["defaultUpdateChannel"] = self.defaultUpdateChannelComboBox.GetSelection()
 
 
 class TouchInteractionPanel(SettingsPanel):
@@ -3733,6 +3754,7 @@ class AdvancedPanelControls(
 		#  Advanced settings panel
 		label = _("Speech")
 		speechSizer = wx.StaticBoxSizer(wx.VERTICAL, self, label=label)
+		speechBox = speechSizer.GetStaticBox()
 		speechGroup = guiHelper.BoxSizerHelper(speechSizer, sizer=speechSizer)
 		sHelper.addItem(speechGroup)
 
@@ -3762,6 +3784,14 @@ class AdvancedPanelControls(
 		self.cancelExpiredFocusSpeechCombo.defaultValue = self._getDefaultValue(
 			["featureFlag", "cancelExpiredFocusSpeech"],
 		)
+
+		# Translators: This is the label for a checkbox control in the
+		#  Advanced settings panel.
+		label = _("Trim leading silence in speech audio")
+		self.trimLeadingSilenceCheckBox = speechGroup.addItem(wx.CheckBox(speechBox, label=label))
+		self.bindHelpEvent("TrimLeadingSilenceSpeech", self.trimLeadingSilenceCheckBox)
+		self.trimLeadingSilenceCheckBox.SetValue(config.conf["speech"]["trimLeadingSilence"])
+		self.trimLeadingSilenceCheckBox.defaultValue = self._getDefaultValue(["speech", "trimLeadingSilence"])
 
 		# Translators: This is the label for a group of advanced options in the
 		#  Advanced settings panel
@@ -3947,11 +3977,11 @@ class AdvancedPanelControls(
 			and self.wtStrategyCombo.isValueConfigSpecDefault()
 			and self.cancelExpiredFocusSpeechCombo.GetSelection()
 			== self.cancelExpiredFocusSpeechCombo.defaultValue
+			and self.trimLeadingSilenceCheckBox.IsChecked() == self.trimLeadingSilenceCheckBox.defaultValue
 			and self.loadChromeVBufWhenBusyCombo.isValueConfigSpecDefault()
 			and self.caretMoveTimeoutSpinControl.GetValue() == self.caretMoveTimeoutSpinControl.defaultValue
 			and self.reportTransparentColorCheckBox.GetValue()
 			== self.reportTransparentColorCheckBox.defaultValue
-			and self.wasapiComboBox.isValueConfigSpecDefault()
 			and set(self.logCategoriesList.CheckedItems) == set(self.logCategoriesList.defaultCheckedItems)
 			and self.playErrorSoundCombo.GetSelection() == self.playErrorSoundCombo.defaultValue
 			and self.textParagraphRegexEdit.GetValue() == self.textParagraphRegexEdit.defaultValue
@@ -3976,10 +4006,10 @@ class AdvancedPanelControls(
 		self.diffAlgoCombo.SetSelection(self.diffAlgoCombo.defaultValue)
 		self.wtStrategyCombo.resetToConfigSpecDefault()
 		self.cancelExpiredFocusSpeechCombo.SetSelection(self.cancelExpiredFocusSpeechCombo.defaultValue)
+		self.trimLeadingSilenceCheckBox.SetValue(self.trimLeadingSilenceCheckBox.defaultValue)
 		self.loadChromeVBufWhenBusyCombo.resetToConfigSpecDefault()
 		self.caretMoveTimeoutSpinControl.SetValue(self.caretMoveTimeoutSpinControl.defaultValue)
 		self.reportTransparentColorCheckBox.SetValue(self.reportTransparentColorCheckBox.defaultValue)
-		self.wasapiComboBox.resetToConfigSpecDefault()
 		self.logCategoriesList.CheckedItems = self.logCategoriesList.defaultCheckedItems
 		self.playErrorSoundCombo.SetSelection(self.playErrorSoundCombo.defaultValue)
 		self.textParagraphRegexEdit.SetValue(self.textParagraphRegexEdit.defaultValue)
@@ -3987,6 +4017,14 @@ class AdvancedPanelControls(
 
 	def onSave(self):
 		log.debug("Saving advanced config")
+
+		if config.conf["speech"]["trimLeadingSilence"] != self.trimLeadingSilenceCheckBox.IsChecked():
+			# Reload the synthesizer if "trimLeadingSilence" changes
+			config.conf["speech"]["trimLeadingSilence"] = self.trimLeadingSilenceCheckBox.IsChecked()
+			currentSynth = getSynth()
+			if not setSynth(currentSynth.name):
+				_synthWarningDialog(currentSynth.name)
+
 		config.conf["development"]["enableScratchpadDir"] = self.scratchpadCheckBox.IsChecked()
 		selectiveUIAEventRegistrationChoice = self.selectiveUIAEventRegistrationCombo.GetSelection()
 		config.conf["UIA"]["eventRegistration"] = self.selectiveUIAEventRegistrationVals[
